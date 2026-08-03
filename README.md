@@ -95,6 +95,7 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 |---|---|---|---|
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
 | `open_ledger` | basenet | owner + payer | opens an empty ledger at a chosen size (max 256 slots); the only way a PDA gets one |
+| `grow_ledger` | basenet | owner + rent payer | adds slots to an existing ledger |
 | `open_permission` | basenet | owner + payer | makes a ledger private. Optional — only needed before delegating |
 | `close_permission` | basenet | owner + rent payer | gives that privacy up again |
 | `deposit` | basenet | owner | wallet → ledger; opens the ledger and its permission on first use. Wallets only |
@@ -106,7 +107,7 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 | `undelegate` | rollup | payer | commits the ledger back to basenet |
 | `close_ledger` | basenet | owner + rent payer | sweeps everything out and refunds all rent |
 
-There is deliberately no `grow`, no `create_permission` and no `commit_ledger`. A wallet's ledger
+There is deliberately no `create_permission` and no `commit_ledger`. A wallet's ledger
 is created by the deposit that first needs it, grows from inside `deposit`, and gets its
 permission at creation; commit is implicit in `undelegate`. `open_ledger` exists only because a
 PDA can do none of that for itself.
@@ -194,9 +195,10 @@ people would hide.
 
 What a PDA cannot do is open its own ledger: it holds no lamports for rent and cannot sign a
 System transfer. Hence `open_ledger`, which creates an empty one at a chosen size with the rent
-paid by somebody else. Size it for every mint the program will ever pay out — there is no later
-growth, because the settles that fill it move value rather than rent. Capped at 256 slots: rent
-scales with the count and is paid up front.
+paid by somebody else. Capped at 256 slots, since rent scales with the count and is paid up front. It can be extended
+later with `grow_ledger`, funded by the same account that opened it — `deposit` grows a wallet's
+ledger as it goes but refuses an off-curve owner, so that is the only way a program's ledger
+grows.
 
 Each ledger records a **rent payer**: where its rent goes when it closes, and the only account
 that may grow it. A wallet funds its own ledger and nobody else may, because the rent comes back

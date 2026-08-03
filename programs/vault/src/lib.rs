@@ -43,6 +43,12 @@ pub mod vault {
         instructions::open_ledger::handler(ctx, slots)
     }
 
+    /// Adds slots to an existing ledger, funded by the account that opened it. The only way a
+    /// program's ledger grows, since `deposit` refuses an off-curve owner.
+    pub fn grow_ledger(ctx: Context<GrowLedger>, min_free: u16, step: u16) -> Result<()> {
+        instructions::grow_ledger::handler(ctx, min_free, step)
+    }
+
     /// Makes a ledger private. Optional — only a ledger bound for a private rollup needs it,
     /// and `delegate_ledger` is where that becomes non-negotiable.
     pub fn open_permission(ctx: Context<OpenPermission>) -> Result<()> {
