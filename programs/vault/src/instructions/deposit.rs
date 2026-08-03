@@ -62,6 +62,20 @@ pub struct Deposit<'info> {
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+
+    /// Pays for the deposit. The same account as `owner` for an ordinary self-deposit; for a
+    /// PDA's ledger, the wallet standing in for it — a PDA cannot source a transfer. Named in
+    /// no permission: paying in buys no visibility into the ledger it funded.
+    #[account(mut)]
+    pub sponsor: Signer<'info>,
+
+    /// CHECK: the program owning `owner` when that is a PDA. Placeholder otherwise — pass the
+    /// System Program. Validated by hand against the PDA's owner field.
+    pub owner_program: UncheckedAccount<'info>,
+
+    /// CHECK: that program's ProgramData, which names its upgrade authority. Placeholder on
+    /// the self-service path. Validated against the address the program account points at.
+    pub owner_program_data: UncheckedAccount<'info>,
 }
 
 pub fn handler(
@@ -71,6 +85,15 @@ pub fn handler(
     min_free: Option<u16>,
     slot_increase: Option<u16>,
 ) -> Result<()> {
+    // Self-service, or a PDA's ledger with an on-curve sponsor standing in — see
+    // resolve_counterparty for why both must sign.
+    resolve_counterparty(
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.sponsor.to_account_info(),
+        &ctx.accounts.owner_program.to_account_info(),
+        &ctx.accounts.owner_program_data.to_account_info(),
+    )?;
+
     let step = slot_increase.unwrap_or(DEFAULT_SLOTS);
     let min_free = min_free.unwrap_or(DEFAULT_MIN_FREE);
     let ledger_info = ctx.accounts.ledger.to_account_info();
@@ -110,7 +133,7 @@ pub fn handler(
             CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
                 system_program::Transfer {
-                    from: ctx.accounts.owner.to_account_info(),
+                    from: ctx.accounts.sponsor.to_account_info(),
                     to: ctx.accounts.vault.to_account_info(),
                 },
             ),
@@ -128,7 +151,7 @@ pub fn handler(
                 Transfer {
                     from: ctx.accounts.owner_token.to_account_info(),
                     to: ctx.accounts.vault_token.to_account_info(),
-                    authority: ctx.accounts.owner.to_account_info(),
+                    authority: ctx.accounts.sponsor.to_account_info(),
                 },
             ),
             amount,
