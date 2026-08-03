@@ -4,9 +4,9 @@ target/
 test-ledger/
 node_modules
 
-# Local keys. .test-wallets.json holds funded devnet secret keys; nothing in here
-# should ever reach a remote.
-scripts/.test-wallets.json
+# Operational tooling, deliberately not published: it is tied to this deployment's
+# devnet state, and .test-wallets.json inside it holds funded secret keys.
+scripts/
 *.pem
 id.json
 **/deploy/*-keypair.json

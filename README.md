@@ -208,21 +208,6 @@ Check for orphaned buffer accounts afterwards; a failed upgrade strands their re
 solana program show --buffers --url devnet -k <authority.json>
 ```
 
-## Scripts
-
-| script | what |
-|---|---|
-| `exercise-devnet.mjs` | end-to-end: deposit, settle, grow, withdraw, close |
-| `privacy-devnet.mjs` | delegates to the TEE and proves who can and cannot read a ledger |
-| `reclaim-ledgers.mjs` | closes abandoned ledgers (needs a recovery build — see its header) |
-| `tee-auth.mjs` | signs the challenge and returns a `?token=` for the private rollup |
-| `test-wallets.mjs` | persistent, reusable funded test wallets |
-
-Test wallets are **persisted and reused** rather than generated per run, and swept in a `finally`.
-Generating a keypair, funding it, and walking away strands devnet SOL permanently — airdrops have
-not worked in a long time. Isolation comes from closing the *ledgers* each run, not from burning
-the wallet.
-
 ## Talking to a private rollup
 
 Reads fail closed and writes return `401` without a token. Get one by signing a challenge:
@@ -234,6 +219,11 @@ POST /auth/login  { pubkey, challenge, signature }  → { token }
 
 then put `?token=<token>` on every RPC URL. No transaction, no account, no cost — it just proves
 you hold the key, which is what lets the validator decide whether to serve a private ledger.
+
+## Licence
+
+[Apache License 2.0](LICENSE). Apache rather than MIT for the explicit patent grant, which
+matters for on-chain code somebody else may build a product on.
 
 ## Layout
 
@@ -249,6 +239,5 @@ programs/vault/src/
     receipt.rs              create_receipt, settle_receipt
     delegation.rs           delegate_ledger, undelegate
     close_ledger.rs
-scripts/                    devnet exercises, see the table above
 vault-program-spec.md       the long-form design notes
 ```
