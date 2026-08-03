@@ -94,7 +94,7 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 | instruction | where | who signs | what it does |
 |---|---|---|---|
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
-| `open_ledger` | basenet | owner + payer | opens an empty ledger at a chosen size; the only way a PDA gets one |
+| `open_ledger` | basenet | owner + payer | opens an empty ledger at a chosen size (max 256 slots); the only way a PDA gets one |
 | `open_permission` | basenet | owner + payer | makes a ledger private. Optional — only needed before delegating |
 | `close_permission` | basenet | owner + rent payer | gives that privacy up again |
 | `deposit` | basenet | owner | wallet → ledger; opens the ledger and its permission on first use. Wallets only |
@@ -195,7 +195,8 @@ people would hide.
 What a PDA cannot do is open its own ledger: it holds no lamports for rent and cannot sign a
 System transfer. Hence `open_ledger`, which creates an empty one at a chosen size with the rent
 paid by somebody else. Size it for every mint the program will ever pay out — there is no later
-growth, because the settles that fill it move value rather than rent.
+growth, because the settles that fill it move value rather than rent. Capped at 256 slots: rent
+scales with the count and is paid up front.
 
 Each ledger records a **rent payer**: where its rent goes when it closes, and the only account
 that may grow it. A wallet funds its own ledger and nobody else may, because the rent comes back

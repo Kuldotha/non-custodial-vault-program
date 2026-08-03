@@ -13,6 +13,10 @@ pub const DEFAULT_SLOTS: u16 = 32;
 pub const DEFAULT_MIN_FREE: u16 = 16;
 /// Solana caps a single realloc at 10 KiB, which is 256 entries.
 pub const MAX_GROW_STEP: u16 = 256;
+/// Largest capacity a ledger may be opened with. Rent scales with it and is paid up front, so an
+/// accidental zero too many is an expensive mistake — 256 slots is already far past any realistic
+/// mint set, and a ledger that genuinely needs more can be grown a step at a time.
+pub const MAX_SLOTS: u16 = 256;
 
 pub const ENTRY_SIZE: usize = 32 + 8;
 

@@ -18,9 +18,11 @@ use crate::state::*;
 /// rollup, needs none — and paying rent for one is pure waste in those cases. Privacy is opted
 /// into with `open_permission`, which `delegate_ledger` then insists on.
 ///
-/// `slots` sizes it up front. A game paying out fourteen tokens wants room for fourteen at
-/// creation rather than growing a slot at a time, and unlike `deposit` there is no later call to
-/// grow it — the settles that fill it move value, not rent.
+/// `slots` sizes it up front, capped at [`MAX_SLOTS`]. A game paying out fourteen tokens wants
+/// room for fourteen at creation rather than growing a slot at a time, and unlike `deposit` there
+/// is no later call to grow it — the settles that fill it move value, not rent. The cap is there
+/// because rent scales with the number and is paid on the spot: a zero too many is an expensive
+/// mistake, and nothing realistic comes near it.
 ///
 /// A **wallet pays its own rent**; only a PDA may be sponsored, because a PDA claimed by its
 /// program can neither hold lamports usefully nor source a System transfer. The sponsorship
@@ -53,7 +55,10 @@ pub struct OpenLedger<'info> {
 pub fn handler(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
     let ledger_info = ctx.accounts.ledger.to_account_info();
     require!(ledger_info.data_is_empty(), VaultError::LedgerExists);
-    require!(slots > 0, VaultError::LedgerFull);
+    require!(
+        slots > 0 && slots <= MAX_SLOTS,
+        VaultError::BadSlotCount
+    );
 
     let ledger = create_ledger_account_sized(
         &ledger_info,
