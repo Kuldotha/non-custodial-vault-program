@@ -198,10 +198,10 @@ paid by somebody else. Size it for every mint the program will ever pay out — 
 growth, because the settles that fill it move value rather than rent.
 
 Each ledger records a **rent payer**: where its rent goes when it closes, and the only account
-that may grow it. For a wallet that is the wallet. For a PDA it is the **upgrade authority of the
-program behind it**, derived from the account's owner and that program's ProgramData rather than
-taken from the caller — a PDA cannot hold rent usefully, so the holder is whoever controls the
-program. It decides where rent goes home and nothing else; it authorises no movement of value.
+that may grow it. A wallet funds its own ledger and nobody else may, because the rent comes back
+to the owner and paying somebody's rent would otherwise be a way to hand them money. A PDA cannot
+pay, so whoever does becomes the rent payer — the lamports return to them, which is what makes
+sponsoring a program's ledger free of that problem.
 
 `open_permission` creates its permission as `[owner, the program behind it]`, both derived — the program read off
 the account's owner field, never passed. A program has to reach its own ledgers to settle them,

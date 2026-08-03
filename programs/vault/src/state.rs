@@ -175,49 +175,6 @@ pub fn is_pda(owner: &Pubkey) -> bool {
     !solana_curve25519::edwards::validate_edwards(&point)
 }
 
-/// Where a ledger's rent belongs, decided by what kind of account owns it.
-///
-/// A wallet is its own rent payer. A **PDA** cannot be: it holds nothing, and rent returned to it
-/// would be stranded behind whatever its program does or does not implement. The holder is
-/// whoever controls that program — its **upgrade authority** — read from chain data rather than
-/// taken on trust:
-///
-/// 1. the PDA is owned by a program, which names it;
-/// 2. the program account points at its ProgramData;
-/// 3. ProgramData names the current upgrade authority.
-///
-/// This decides only where rent goes home. It authorises nothing: deposit and withdraw remain
-/// wallet-only, and value still moves solely through `settle`.
-pub fn rent_payer_for<'info>(
-    owner: &AccountInfo<'info>,
-    program: &AccountInfo<'info>,
-    program_data: &AccountInfo<'info>,
-) -> Result<Pubkey> {
-    if !is_pda(owner.key) {
-        return Ok(*owner.key);
-    }
-
-    require_keys_eq!(*owner.owner, *program.key, VaultError::OffCurveOwnerNotAllowed);
-    require!(program.executable, VaultError::OffCurveOwnerNotAllowed);
-
-    // UpgradeableLoaderState::Program { programdata_address }: u32 tag 2, then the address.
-    let pdata = program.try_borrow_data()?;
-    require!(pdata.len() >= 36, VaultError::OffCurveOwnerNotAllowed);
-    require!(u32::from_le_bytes(pdata[0..4].try_into().unwrap()) == 2, VaultError::OffCurveOwnerNotAllowed);
-    require_keys_eq!(
-        Pubkey::new_from_array(pdata[4..36].try_into().unwrap()),
-        *program_data.key,
-        VaultError::OffCurveOwnerNotAllowed
-    );
-
-    // UpgradeableLoaderState::ProgramData { slot, Option<Pubkey> }: tag 3, u64, option tag, key.
-    let ddata = program_data.try_borrow_data()?;
-    require!(ddata.len() >= 45, VaultError::OffCurveOwnerNotAllowed);
-    require!(u32::from_le_bytes(ddata[0..4].try_into().unwrap()) == 3, VaultError::OffCurveOwnerNotAllowed);
-    require!(ddata[12] == 1, VaultError::OffCurveOwnerNotAllowed);
-    Ok(Pubkey::new_from_array(ddata[13..45].try_into().unwrap()))
-}
-
 /// The vault's own rent-exempt minimum. Not part of any ledger's balance, so every SOL
 /// path subtracts it before deciding what is spendable.
 pub fn vault_floor() -> Result<u64> {
@@ -299,9 +256,7 @@ pub fn create_ledger_account<'info>(
 ) -> Result<Ledger> {
     // Only wallets reach this path — `deposit` refuses an off-curve owner — so the owner is
     // always its own rent payer here.
-    create_ledger_account_sized(
-        info, owner, owner, system_program, bump, owner.key(), DEFAULT_SLOTS as usize,
-    )
+    create_ledger_account_sized(info, owner, owner, system_program, bump, DEFAULT_SLOTS as usize)
 }
 
 /// As above, but the rent may come from somebody other than the owner and the capacity is
@@ -313,9 +268,20 @@ pub fn create_ledger_account_sized<'info>(
     owner: &Signer<'info>,
     system_program: &Program<'info, System>,
     bump: u8,
-    rent_payer: Pubkey,
     slots: usize,
 ) -> Result<Ledger> {
+    // A wallet funds its own ledger; nobody else may, because the rent comes back to the owner
+    // on close and paying somebody's rent would then be a way to hand them money.
+    //
+    // A PDA cannot pay, so whoever does becomes the rent payer — the lamports return to them,
+    // and they are the only account that may grow or close it. Sponsoring is then free of the
+    // problem above: the money goes back where it came from.
+    let rent_payer = if is_pda(&owner.key()) {
+        payer.key()
+    } else {
+        require_keys_eq!(payer.key(), owner.key(), VaultError::OffCurveOwnerNotAllowed);
+        owner.key()
+    };
 
     let space = Ledger::space(slots);
     anchor_lang::system_program::create_account(

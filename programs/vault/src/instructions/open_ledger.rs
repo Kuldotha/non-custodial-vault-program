@@ -37,21 +37,15 @@ pub struct OpenLedger<'info> {
     /// Signing is what makes this the owner's own decision rather than a stranger's.
     pub owner: Signer<'info>,
 
-    /// Pays the rent. The lamports come from here, but the recorded `rent_payer` is decided by
-    /// the owner's kind — see `rent_payer_for` — and that is who may later grow or close it.
+    /// Pays the rent, and becomes the recorded rent payer when the owner is a PDA — so this is
+    /// who it comes back to, and the only account that may later grow or close the ledger. Must
+    /// be the owner itself when the owner is a wallet.
     #[account(mut)]
     pub payer: Signer<'info>,
 
     /// CHECK: created here and validated by hand — see `create_ledger_account`.
     #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
     pub ledger: UncheckedAccount<'info>,
-
-    /// CHECK: the program owning `owner` when that is a PDA — read only to find its upgrade
-    /// authority. Placeholder for a wallet's ledger; pass the System Program.
-    pub owner_program: UncheckedAccount<'info>,
-
-    /// CHECK: that program's ProgramData, which names the authority. Placeholder for a wallet.
-    pub owner_program_data: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -61,19 +55,12 @@ pub fn handler(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
     require!(ledger_info.data_is_empty(), VaultError::LedgerExists);
     require!(slots > 0, VaultError::LedgerFull);
 
-    let rent_payer = rent_payer_for(
-        &ctx.accounts.owner.to_account_info(),
-        &ctx.accounts.owner_program.to_account_info(),
-        &ctx.accounts.owner_program_data.to_account_info(),
-    )?;
-
     let ledger = create_ledger_account_sized(
         &ledger_info,
         &ctx.accounts.payer,
         &ctx.accounts.owner,
         &ctx.accounts.system_program,
         ctx.bumps.ledger,
-        rent_payer,
         slots as usize,
     )?;
     store_ledger(&ledger_info, &ledger)
