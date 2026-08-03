@@ -37,12 +37,40 @@ from the depositor.
 The tokens themselves live in one **reserve** — PDA `["vault"]` — holding SOL directly and SPL
 tokens in its associated token accounts. A ledger is a claim on the reserve, not a container.
 
-Everything else follows from two rules:
+Everything else follows from three rules:
 
 1. **A withdrawal's destination is derived from the signer, never passed.** There is no way to
    spell a withdrawal to somebody else, so a bug in a calling program cannot redirect funds.
-2. **A program may never debit a human.** `settle` requires exactly one program-side ledger
-   (`pda_auth = 1`) and one human-side ledger, and the human authorises the debit themselves.
+2. **The debited side authorises.** A human authorises by signing. A program authorises by
+   `invoke_signed` over its own seeds, which it can only do for a ledger it owns. So a program
+   cannot debit a human, and cannot debit another program. A *credit* needs no signature, which
+   is what lets a game pay out to a player who has closed the app.
+3. **At most one human ledger in a movement.** Two human ledgers may never meet, in either
+   direction.
+
+### Rule 3 is the one that matters most
+
+It is what makes this not a payments program: **there is no instruction anywhere that moves value
+from one person to another.** `withdraw` derives its destination from the signer, `deposit`
+credits only the depositor, and `settle` is the only place two ledgers touch at all — so refusing
+two human sides there closes the last door.
+
+That has consequences well beyond the code. A program that lets strangers pay each other is doing
+something quite different, legally, from one that lets each person move their own balance in and
+out and spend it with a program. This vault is deliberately the second thing. Peer-to-peer payment
+belongs in a separate program, written by someone who has decided to take that on.
+
+The check is therefore asymmetric on purpose:
+
+```rust
+require!(src.pda_auth || dst.pda_auth, VaultError::NotProgramMediated);
+```
+
+It looks like it wants to be `src.pda_auth != dst.pda_auth`, or like the signature rule alone
+should be enough. Neither is true. The XOR forbids program-to-program movement, which is
+legitimate — a game moving a share of each sale into a jackpot account it cannot later drain.
+"Whoever is debited signs", on its own, makes Alice-pays-Bob expressible in a single instruction.
+Only the pair of rules gives both properties, and a tidy-up that merges them removes one silently.
 
 ---
 
@@ -53,7 +81,7 @@ Everything else follows from two rules:
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
 | `deposit` | basenet | owner | wallet → ledger; opens the ledger and its permission on first use |
 | `withdraw` | basenet | owner | ledger → wallet, same owner only |
-| `settle` | either | the human side | moves a balance between a human and a program ledger |
+| `settle` | either | the debited side | moves a balance between two ledgers, at most one of them human |
 | `create_receipt` | rollup | human + program | writes an agreed set of movements to an ephemeral account |
 | `settle_receipt` | rollup | nobody | applies a receipt, then hands it back to its author |
 | `delegate_ledger` | basenet | payer + owner | hands the ledger to a rollup validator |

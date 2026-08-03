@@ -38,25 +38,31 @@ pub fn handler(ctx: Context<Settle>, mint: Pubkey, amount: u64) -> Result<()> {
     require_keys_eq!(ctx.accounts.src_authority.key(), src.owner, VaultError::MissingUserSignature);
     require_keys_eq!(ctx.accounts.dst_authority.key(), dst.owner, VaultError::MissingUserSignature);
 
-    // Exactly one program side and one human side. Checked before any balance moves.
-    require!(src.pda_auth != dst.pda_auth, VaultError::NotProgramMediated);
+    // ── the two rules ────────────────────────────────────────────────────────
+    //
+    // 1. AT MOST ONE HUMAN. Two human ledgers may never meet, in either direction.
+    //    This is what makes the vault not a payments program: there is no instruction
+    //    anywhere that moves value from one person to another. `withdraw` derives its
+    //    destination from the signer so it cannot be spelled there, `deposit` credits only
+    //    the depositor, and this is the one place two ledgers touch at all.
+    //
+    //    Do NOT "simplify" this to `src.pda_auth != dst.pda_auth` or to a symmetric
+    //    "whoever is debited signs". Both read as tidier and both make Alice-pays-Bob
+    //    expressible in a single instruction.
+    //
+    // 2. THE DEBITED SIDE AUTHORISES. A human authorises by signing. A program authorises
+    //    by `invoke_signed` over its own seeds, which it can only do for ledgers it owns.
+    //    A program therefore cannot debit a human, and cannot debit another program.
+    //
+    // Checked before any balance moves.
+    require!(src.pda_auth || dst.pda_auth, VaultError::NotProgramMediated);
 
-    // The program side always signs — it is the one mediating the movement.
-    let program_side = if src.pda_auth {
-        &ctx.accounts.src_authority
-    } else {
-        &ctx.accounts.dst_authority
-    };
-    require!(program_side.is_signer, VaultError::MissingProgramSignature);
-
-    // A human signs to be debited, never to be credited. So a game can pay out to a
-    // player who is offline, and can never pull from one who did not authorise it.
-    if !src.pda_auth {
-        require!(
-            ctx.accounts.src_authority.is_signer,
-            VaultError::MissingUserSignature
-        );
-    }
+    // Whoever is losing the balance has to have authorised it. A credit needs no signature,
+    // which is what lets a game pay out to a player who has closed the app.
+    require!(
+        ctx.accounts.src_authority.is_signer,
+        if src.pda_auth { VaultError::MissingProgramSignature } else { VaultError::MissingUserSignature },
+    );
 
     let src_index = ctx.accounts.src.index_of(&mint).ok_or(VaultError::NoBalance)?;
     {
