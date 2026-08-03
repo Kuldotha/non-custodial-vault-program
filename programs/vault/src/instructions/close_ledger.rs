@@ -32,7 +32,7 @@ pub struct CloseLedger<'info> {
     #[account(
         mut,
         close = rent_payer,
-        constraint = ledger.rent_payer == rent_payer.key() @ VaultError::OffCurveOwnerNotAllowed,
+        constraint = ledger.rent_payer == rent_payer.key() @ VaultError::NotRentPayer,
         seeds = [b"ledger", owner.key().as_ref()],
         bump = ledger.bump,
         has_one = owner,

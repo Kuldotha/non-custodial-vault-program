@@ -143,6 +143,10 @@ pub enum VaultError {
     BadAuthority,
     #[msg("deposit and withdraw are wallet-only; program ledgers move value through settle")]
     OffCurveOwnerNotAllowed,
+    #[msg("A wallet must fund its own ledger — only a PDA's rent may be sponsored")]
+    MustFundOwnLedger,
+    #[msg("Only the ledger's recorded rent payer may do this")]
+    NotRentPayer,
     #[msg("That ledger already exists")]
     LedgerExists,
     #[msg("This receipt has already been settled")]
@@ -216,7 +220,7 @@ pub fn ensure_headroom<'info>(
 ) -> Result<()> {
     // Growth is funded by whoever funded the account, and by nobody else. Any other payer
     // would reopen the channel a slot at a time, since the extra rent leaves with the refund.
-    require_keys_eq!(payer.key(), ledger.rent_payer, VaultError::OffCurveOwnerNotAllowed);
+    require_keys_eq!(payer.key(), ledger.rent_payer, VaultError::NotRentPayer);
 
     if ledger.free_slots() >= min_free as usize {
         return Ok(());
@@ -283,7 +287,7 @@ pub fn create_ledger_account_sized<'info>(
     let rent_payer = if is_pda(&owner.key()) {
         payer.key()
     } else {
-        require_keys_eq!(payer.key(), owner.key(), VaultError::OffCurveOwnerNotAllowed);
+        require_keys_eq!(payer.key(), owner.key(), VaultError::MustFundOwnLedger);
         owner.key()
     };
 

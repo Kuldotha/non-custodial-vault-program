@@ -29,7 +29,7 @@ pub struct ClosePermission<'info> {
     pub permission: UncheckedAccount<'info>,
 
     /// Receives the rent and must sign, as the permission program requires.
-    #[account(mut, address = ledger.rent_payer @ VaultError::OffCurveOwnerNotAllowed)]
+    #[account(mut, address = ledger.rent_payer @ VaultError::NotRentPayer)]
     pub payer: Signer<'info>,
 
     /// CHECK: the MagicBlock permission program.

@@ -43,7 +43,7 @@ pub struct OpenPermission<'info> {
         seeds = [b"ledger", owner.key().as_ref()],
         bump = ledger.bump,
         has_one = owner,
-        constraint = ledger.rent_payer == payer.key() @ VaultError::OffCurveOwnerNotAllowed,
+        constraint = ledger.rent_payer == payer.key() @ VaultError::NotRentPayer,
     )]
     pub ledger: Account<'info, Ledger>,
 
