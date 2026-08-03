@@ -133,8 +133,10 @@ pub enum VaultError {
     NoAuthorization,
     #[msg("The returned seeds do not derive the program ledger's owner")]
     BadAuthority,
-    #[msg("A program ledger's counterparty must be an on-curve account that signs")]
-    BadCounterparty,
+    #[msg("A program's ledger is filled and emptied by settle, never by deposit or withdraw")]
+    ProgramLedgerMustSettle,
+    #[msg("That ledger already exists")]
+    LedgerExists,
     #[msg("This receipt has already been settled")]
     AlreadySettled,
 }
@@ -167,82 +169,6 @@ pub fn require_reserve(info: &AccountInfo, vault: &Pubkey, mint: &Pubkey) -> Res
 pub fn is_pda(owner: &Pubkey) -> bool {
     let point = solana_curve25519::edwards::PodEdwardsPoint(owner.to_bytes());
     !solana_curve25519::edwards::validate_edwards(&point)
-}
-
-/// Resolves who the other party is on a movement, and enforces the rule that makes program
-/// ledgers usable without opening a payment channel between people.
-///
-/// Self-service — `owner == other` — is the ordinary case and unchanged. Otherwise the ledger
-/// belongs to a **PDA**, which can neither source a System transfer nor receive one usefully,
-/// so an on-curve counterparty stands in: a sponsor on the way in, a receiver on the way out.
-///
-/// Both must sign, always. The PDA's signature is its program consenting; the counterparty's is
-/// the wallet consenting. Requiring both is what stops a program pushing value at an address
-/// that never agreed to it, and requiring the counterparty to be on-curve keeps program-to-
-/// program movement out of deposit and withdraw entirely — that belongs in `settle`.
-///
-/// The counterparty must also be the calling program's **upgrade authority**, proved from
-/// chain data rather than taken on trust — see [`require_upgrade_authority`].
-///
-/// Returns true when this is the PDA case.
-pub fn resolve_counterparty(
-    owner: &AccountInfo,
-    other: &AccountInfo,
-    program: &AccountInfo,
-    program_data: &AccountInfo,
-) -> Result<bool> {
-    if owner.key == other.key {
-        return Ok(false);
-    }
-    require!(is_pda(owner.key), VaultError::BadCounterparty);
-    require!(!is_pda(other.key), VaultError::BadCounterparty);
-    require!(other.is_signer, VaultError::BadCounterparty);
-    require_upgrade_authority(owner, program, program_data, other)?;
-    Ok(true)
-}
-
-/// Proves [`authority`] may upgrade the program that owns [`owner`], following the chain the
-/// loader already maintains — nothing here is taken from the caller on trust:
-///
-/// 1. the PDA is owned by a program, which names that program;
-/// 2. the program account points at its ProgramData;
-/// 3. ProgramData names the current upgrade authority;
-/// 4. that authority is the account in hand.
-///
-/// A PDA signature alone proves only that *some* program authorised the movement, which is no
-/// restriction at all if that program exposes an instruction anyone may call. Whoever can
-/// upgrade a program can already rewrite what its treasury does, so requiring their signature
-/// adds no power they lack — it just stops everyone else.
-pub fn require_upgrade_authority(
-    owner: &AccountInfo,
-    program: &AccountInfo,
-    program_data: &AccountInfo,
-    authority: &AccountInfo,
-) -> Result<()> {
-    // 1 — the PDA must be claimed by the program, not left System-owned.
-    require_keys_eq!(*owner.owner, *program.key, VaultError::BadCounterparty);
-    require!(program.executable, VaultError::BadCounterparty);
-
-    // 2 — UpgradeableLoaderState::Program { programdata_address }: u32 tag 2, then the address.
-    let pdata = program.try_borrow_data()?;
-    require!(pdata.len() >= 36, VaultError::BadCounterparty);
-    require!(u32::from_le_bytes(pdata[0..4].try_into().unwrap()) == 2, VaultError::BadCounterparty);
-    require_keys_eq!(
-        Pubkey::new_from_array(pdata[4..36].try_into().unwrap()),
-        *program_data.key,
-        VaultError::BadCounterparty
-    );
-
-    // 3 — UpgradeableLoaderState::ProgramData { slot, Option<Pubkey> }: tag 3, u64, tag, key.
-    let ddata = program_data.try_borrow_data()?;
-    require!(ddata.len() >= 45, VaultError::BadCounterparty);
-    require!(u32::from_le_bytes(ddata[0..4].try_into().unwrap()) == 3, VaultError::BadCounterparty);
-    require!(ddata[12] == 1, VaultError::BadCounterparty); // Some — never burned for a game
-    let upgrade_authority = Pubkey::new_from_array(ddata[13..45].try_into().unwrap());
-
-    // 4 — and it has to be the account standing in for the PDA.
-    require_keys_eq!(upgrade_authority, *authority.key, VaultError::BadCounterparty);
-    Ok(())
 }
 
 /// The vault's own rent-exempt minimum. Not part of any ledger's balance, so every SOL
@@ -320,12 +246,26 @@ pub fn create_ledger_account<'info>(
     system_program: &Program<'info, System>,
     bump: u8,
 ) -> Result<Ledger> {
-    let space = Ledger::space(DEFAULT_SLOTS as usize);
+    create_ledger_account_sized(info, owner, owner, system_program, bump, DEFAULT_SLOTS as usize)
+}
+
+/// As above, but the rent may come from somebody other than the owner and the capacity is
+/// chosen rather than defaulted. A PDA cannot pay its own rent, and a program that pays out
+/// fourteen tokens wants room for fourteen from the start.
+pub fn create_ledger_account_sized<'info>(
+    info: &AccountInfo<'info>,
+    payer: &Signer<'info>,
+    owner: &Signer<'info>,
+    system_program: &Program<'info, System>,
+    bump: u8,
+    slots: usize,
+) -> Result<Ledger> {
+    let space = Ledger::space(slots);
     anchor_lang::system_program::create_account(
         CpiContext::new_with_signer(
             system_program.to_account_info(),
             anchor_lang::system_program::CreateAccount {
-                from: owner.to_account_info(),
+                from: payer.to_account_info(),
                 to: info.clone(),
             },
             &[&[b"ledger", owner.key().as_ref(), &[bump]]],
@@ -336,7 +276,7 @@ pub fn create_ledger_account<'info>(
     )?;
 
     let mut ledger = Ledger::default();
-    ledger.init(owner.key(), is_pda(&owner.key()), bump, DEFAULT_SLOTS as usize);
+    ledger.init(owner.key(), is_pda(&owner.key()), bump, slots);
     Ok(ledger)
 }
 

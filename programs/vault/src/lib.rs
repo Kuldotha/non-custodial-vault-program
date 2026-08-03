@@ -36,6 +36,12 @@ pub mod vault {
     /// Also the only way a ledger is created: it opens the ledger and its permission on
     /// first use and keeps the headroom band, so none of those is a separate instruction.
     /// A program opens its own ledger by depositing zero, and grows it the same way.
+    /// Opens an empty ledger. The only way a program's PDA gets one, since it can neither pay
+    /// rent nor source a deposit — it is filled by `settle` afterwards.
+    pub fn open_ledger(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
+        instructions::open_ledger::handler(ctx, slots)
+    }
+
     pub fn deposit(
         ctx: Context<Deposit>,
         mint: Pubkey,

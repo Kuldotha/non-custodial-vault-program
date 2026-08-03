@@ -47,29 +47,28 @@ Everything else follows from three rules:
    is what lets a game pay out to a player who has closed the app.
 3. **At most one human ledger in a movement.** Two human ledgers may never meet, in either
    direction.
-4. **A program's ledgers need two signatures.** The program signs for its PDA, and the
-   program's **upgrade authority** signs as the wallet paying in or taking delivery.
+4. **A program's ledger is never deposited to or withdrawn from.** Off-curve owners are
+   refused by both instructions. Value reaches a program only through `settle`.
 
 ### Rule 3 is the one that matters most
 
 It is what makes this not a payments program: **no instruction here takes value from one person
-and gives it to another.** `withdraw` sends only to the ledger's owner or, for a program's ledger,
-to that program's upgrade authority; `deposit` credits only the depositor or a program; and
-`settle` is the only place two ledgers touch at all — so refusing two human sides there closes the
-last door.
+and gives it to another.** `withdraw` sends only to the ledger's owner and `deposit`
+credits only the depositor — both refuse a program's ledger outright — so `settle` is the only
+place two ledgers touch at all, and refusing two human sides there closes the last door.
 
 Stated precisely, because the honest version is narrower than the slogan: the vault exposes no
 peer-to-peer instruction. It cannot stop value moving between people *through* primitives Solana
-provides regardless. Somebody can deploy a stub program, fund its ledger, hand the upgrade
-authority to another wallet with `set_authority`, and let them withdraw. That is a transfer, and
-it is available whether or not this program exists — `solana program close --recipient` pays
-programdata rent to any address, and System transfers move SOL between wallets all day. Any
-program holding balances composes with those.
+provides regardless. Somebody can deploy a stub program, settle into its ledger, hand the upgrade
+authority to another wallet with `set_authority`, and let them upgrade it into something that
+settles the balance back out to themselves. That is a transfer, and it is available whether or not
+this program exists — `solana program close --recipient` pays programdata rent to any address, and
+System transfers move SOL between wallets all day. Any program holding balances composes with
+those, because whoever controls a program controls what its treasury does.
 
-Pinning the upgrade authority recorded at a ledger's creation would close that particular route.
-It is deliberately not done: rotating an authority is normal and healthy, and pinning it turns a
-routine key rotation into permanent loss of your own treasury — a real footgun traded against an
-attacker who had simpler options anyway.
+The vault does not try to prevent it, and could not: it cannot tell a game from a stub, and the
+route runs through the loader rather than through anything here. What it can do — and does — is
+offer no instruction of its own that moves value from one person to another.
 
 That has consequences well beyond the code. A program that lets strangers pay each other is doing
 something quite different, legally, from one that lets each person move their own balance in and
@@ -95,8 +94,9 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 | instruction | where | who signs | what it does |
 |---|---|---|---|
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
-| `deposit` | basenet | owner (+ sponsor) | wallet → ledger; opens the ledger and its permission on first use |
-| `withdraw` | basenet | owner (+ receiver) | ledger → wallet, same owner or the program's upgrade authority |
+| `open_ledger` | basenet | owner + payer | opens an empty ledger at a chosen size; the only way a PDA gets one |
+| `deposit` | basenet | owner | wallet → ledger; opens the ledger and its permission on first use. Wallets only |
+| `withdraw` | basenet | owner | ledger → wallet, same owner only. Wallets only |
 | `settle` | either | the debited side | moves a balance between two ledgers, at most one of them human |
 | `create_receipt` | rollup | human + program | writes an agreed set of movements to an ephemeral account |
 | `settle_receipt` | rollup | nobody | applies a receipt, then hands it back to its author |
@@ -104,9 +104,10 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 | `undelegate` | rollup | payer | commits the ledger back to basenet |
 | `close_ledger` | basenet | owner | sweeps everything out and refunds all rent |
 
-There is deliberately no `create_ledger`, no `grow`, no `create_permission` and no
-`commit_ledger`. A ledger is created by the deposit that first needs it, grows from inside
-`deposit`, and gets its permission at creation; commit is implicit in `undelegate`.
+There is deliberately no `grow`, no `create_permission` and no `commit_ledger`. A wallet's ledger
+is created by the deposit that first needs it, grows from inside `deposit`, and gets its
+permission at creation; commit is implicit in `undelegate`. `open_ledger` exists only because a
+PDA can do none of that for itself.
 
 ### PDAs
 
@@ -172,35 +173,38 @@ For SOL the two token slots carry the System Program as a placeholder and are ne
 
 ### A program's treasury
 
-A program can own ledgers — as many as it has PDAs — and needs no integration code beyond a CPI
-that signs for them. The house and jackpot of a game are two ledgers of the same program.
+A program can own ledgers — as many as it has PDAs. A game's house and jackpot are two ledgers of
+the same program.
 
-A PDA can neither source a transfer nor usefully receive one, so an on-curve wallet stands in: a
-**sponsor** on the way in, a **receiver** on the way out. Both it and the PDA must sign, and the
-vault checks the wallet against the program's upgrade authority — read off ProgramData, not taken
-from the caller:
+**Neither is ever deposited to or withdrawn from.** `deposit` and `withdraw` refuse an off-curve
+owner outright, so the only way value reaches or leaves a program is `settle` against a human who
+already holds a balance:
 
 ```
-owner (a PDA) → owner.owner names the program
-              → program account points at its ProgramData
-              → ProgramData names the upgrade authority
-              → that authority must be the sponsor / receiver, and must sign
+fund     admin deposits to their own ledger, then settles admin → house
+withdraw settle house → admin, then admin withdraws their own ledger
 ```
 
-The two signatures do different jobs, and neither covers for the other:
+Both are ordinary human-to-program settles: the debited side signs, and there is never more than
+one human involved. Nothing about a program's treasury is a different shape from anyone else's,
+which is the point — a special path in and out is exactly where a way to move value between
+people would hide.
 
-- **the PDA's** is the program consenting. A program that never signs for a given PDA in any
-  withdraw path has made that ledger permanently unwithdrawable, by anyone.
-- **the upgrade authority's** decides who may trigger it. A PDA signature alone means nothing if
-  the program exposes an instruction the world can call.
+What a PDA cannot do is open its own ledger: it holds no lamports for rent and cannot sign a
+System transfer. Hence `open_ledger`, which creates an empty one at a chosen size with the rent
+paid by somebody else. Size it for every mint the program will ever pay out — there is no later
+growth, because the settles that fill it move value rather than rent.
 
-That pair is what a jackpot is built from. The game signs for `["house"]` in its withdraw path and
-never for `["jackpot"]`, so the house can be drawn down and the pot cannot — it leaves only
-through `settle`, on a winning card. Nothing enforces that but the absence of code, which is
-exactly why it holds.
+Its permission is created as `[owner, the program behind it]`, both derived — the program read off
+the account's owner field, never passed. A program has to reach its own ledgers to settle them,
+and the rollup's filter only ever sees an instruction's top-level program, so a PDA in that list
+would not admit it. The payer is deliberately absent: paying rent for an empty account credits
+nobody and buys no visibility.
 
-The ledger's permission is created as `[vault, owner, the program]`, all derived. The sponsor
-never appears in it: paying in buys no visibility into the ledger you funded.
+That is what a jackpot is built from. The game settles into `["jackpot"]` on every sale and out of
+it only on a win, and simply never writes an instruction that settles it anywhere else. There is
+then no way to drain it, by anyone, ever — enforced by the absence of code rather than by a check
+somebody could relax.
 
 ### A session
 
