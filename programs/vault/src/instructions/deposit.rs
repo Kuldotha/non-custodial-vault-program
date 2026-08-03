@@ -82,7 +82,7 @@ pub fn handler(
     // move *tokens* in and out directly while SOL stayed impossible.
     require!(
         !is_pda(&ctx.accounts.owner.key()),
-        VaultError::ProgramLedgerMustSettle
+        VaultError::OffCurveOwnerNotAllowed
     );
 
     let step = slot_increase.unwrap_or(DEFAULT_SLOTS);

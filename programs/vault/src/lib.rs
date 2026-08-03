@@ -5,8 +5,9 @@
 //! to a MagicBlock ephemeral rollup.
 //!
 //! The defining property, enforced in `settle` and not merely documented: **value can
-//! never move between two humans.** Every movement has exactly one program side and one
-//! human side, so this cannot be used as a payment rail.
+//! never move between two humans.** Every movement has *at most* one human side — program
+//! to program is allowed, human to human is unrepresentable — so this cannot be used as a
+//! payment rail. `deposit` and `withdraw` are wallet-only for the same reason.
 //!
 //! See `vault-program-spec.md` for the full design.
 
@@ -40,6 +41,17 @@ pub mod vault {
     /// rent nor source a deposit — it is filled by `settle` afterwards.
     pub fn open_ledger(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
         instructions::open_ledger::handler(ctx, slots)
+    }
+
+    /// Makes a ledger private. Optional — only a ledger bound for a private rollup needs it,
+    /// and `delegate_ledger` is where that becomes non-negotiable.
+    pub fn open_permission(ctx: Context<OpenPermission>) -> Result<()> {
+        instructions::open_permission::handler(ctx)
+    }
+
+    /// TEMPORARY. Closes a ledger's permission so a stuck one can be undelegated.
+    pub fn close_permission(ctx: Context<ClosePermission>) -> Result<()> {
+        instructions::close_permission::handler(ctx)
     }
 
     pub fn deposit(

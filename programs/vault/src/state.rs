@@ -32,6 +32,9 @@ pub struct Ledger {
     pub pda_auth: bool,
     pub bump: u8,
     pub _pad: [u8; 6],
+    /// Where the rent goes when this account is closed, and the only key that may grow it.
+    /// Always the owner — the lamports may come from any signer, but they come back here.
+    pub rent_payer: Pubkey,
     /// Pre-allocated slots. `entries.len()` is the capacity; a delegated ledger
     /// cannot realloc, so the space has to be there before the session starts.
     pub entries: Vec<Entry>,
@@ -39,7 +42,7 @@ pub struct Ledger {
 
 impl Ledger {
     /// 8 discriminator + owner + pda_auth + bump + pad + vec len prefix.
-    pub const HEADER: usize = 8 + 32 + 1 + 1 + 6 + 4;
+    pub const HEADER: usize = 8 + 32 + 1 + 1 + 6 + 32 + 4;
 
     pub fn space(slots: usize) -> usize {
         Self::HEADER + slots * ENTRY_SIZE
@@ -58,11 +61,12 @@ impl Ledger {
     }
 
     /// Initialises a fresh ledger: every slot present and zeroed, slot 0 claimed by SOL.
-    pub fn init(&mut self, owner: Pubkey, pda_auth: bool, bump: u8, slots: usize) {
+    pub fn init(&mut self, owner: Pubkey, pda_auth: bool, bump: u8, rent_payer: Pubkey, slots: usize) {
         self.owner = owner;
         self.pda_auth = pda_auth;
         self.bump = bump;
         self._pad = [0u8; 6];
+        self.rent_payer = rent_payer;
         self.entries = vec![Entry::default(); slots];
         self.entries[0].mint = SOL_MINT;
     }
@@ -133,8 +137,8 @@ pub enum VaultError {
     NoAuthorization,
     #[msg("The returned seeds do not derive the program ledger's owner")]
     BadAuthority,
-    #[msg("A program's ledger is filled and emptied by settle, never by deposit or withdraw")]
-    ProgramLedgerMustSettle,
+    #[msg("deposit and withdraw are wallet-only; program ledgers move value through settle")]
+    OffCurveOwnerNotAllowed,
     #[msg("That ledger already exists")]
     LedgerExists,
     #[msg("This receipt has already been settled")]
@@ -169,6 +173,49 @@ pub fn require_reserve(info: &AccountInfo, vault: &Pubkey, mint: &Pubkey) -> Res
 pub fn is_pda(owner: &Pubkey) -> bool {
     let point = solana_curve25519::edwards::PodEdwardsPoint(owner.to_bytes());
     !solana_curve25519::edwards::validate_edwards(&point)
+}
+
+/// Where a ledger's rent belongs, decided by what kind of account owns it.
+///
+/// A wallet is its own rent payer. A **PDA** cannot be: it holds nothing, and rent returned to it
+/// would be stranded behind whatever its program does or does not implement. The holder is
+/// whoever controls that program — its **upgrade authority** — read from chain data rather than
+/// taken on trust:
+///
+/// 1. the PDA is owned by a program, which names it;
+/// 2. the program account points at its ProgramData;
+/// 3. ProgramData names the current upgrade authority.
+///
+/// This decides only where rent goes home. It authorises nothing: deposit and withdraw remain
+/// wallet-only, and value still moves solely through `settle`.
+pub fn rent_payer_for<'info>(
+    owner: &AccountInfo<'info>,
+    program: &AccountInfo<'info>,
+    program_data: &AccountInfo<'info>,
+) -> Result<Pubkey> {
+    if !is_pda(owner.key) {
+        return Ok(*owner.key);
+    }
+
+    require_keys_eq!(*owner.owner, *program.key, VaultError::OffCurveOwnerNotAllowed);
+    require!(program.executable, VaultError::OffCurveOwnerNotAllowed);
+
+    // UpgradeableLoaderState::Program { programdata_address }: u32 tag 2, then the address.
+    let pdata = program.try_borrow_data()?;
+    require!(pdata.len() >= 36, VaultError::OffCurveOwnerNotAllowed);
+    require!(u32::from_le_bytes(pdata[0..4].try_into().unwrap()) == 2, VaultError::OffCurveOwnerNotAllowed);
+    require_keys_eq!(
+        Pubkey::new_from_array(pdata[4..36].try_into().unwrap()),
+        *program_data.key,
+        VaultError::OffCurveOwnerNotAllowed
+    );
+
+    // UpgradeableLoaderState::ProgramData { slot, Option<Pubkey> }: tag 3, u64, option tag, key.
+    let ddata = program_data.try_borrow_data()?;
+    require!(ddata.len() >= 45, VaultError::OffCurveOwnerNotAllowed);
+    require!(u32::from_le_bytes(ddata[0..4].try_into().unwrap()) == 3, VaultError::OffCurveOwnerNotAllowed);
+    require!(ddata[12] == 1, VaultError::OffCurveOwnerNotAllowed);
+    Ok(Pubkey::new_from_array(ddata[13..45].try_into().unwrap()))
 }
 
 /// The vault's own rent-exempt minimum. Not part of any ledger's balance, so every SOL
@@ -206,6 +253,10 @@ pub fn ensure_headroom<'info>(
     min_free: u16,
     step: u16,
 ) -> Result<()> {
+    // Growth is funded by whoever funded the account, and by nobody else. Any other payer
+    // would reopen the channel a slot at a time, since the extra rent leaves with the refund.
+    require_keys_eq!(payer.key(), ledger.rent_payer, VaultError::OffCurveOwnerNotAllowed);
+
     if ledger.free_slots() >= min_free as usize {
         return Ok(());
     }
@@ -246,7 +297,11 @@ pub fn create_ledger_account<'info>(
     system_program: &Program<'info, System>,
     bump: u8,
 ) -> Result<Ledger> {
-    create_ledger_account_sized(info, owner, owner, system_program, bump, DEFAULT_SLOTS as usize)
+    // Only wallets reach this path — `deposit` refuses an off-curve owner — so the owner is
+    // always its own rent payer here.
+    create_ledger_account_sized(
+        info, owner, owner, system_program, bump, owner.key(), DEFAULT_SLOTS as usize,
+    )
 }
 
 /// As above, but the rent may come from somebody other than the owner and the capacity is
@@ -258,8 +313,10 @@ pub fn create_ledger_account_sized<'info>(
     owner: &Signer<'info>,
     system_program: &Program<'info, System>,
     bump: u8,
+    rent_payer: Pubkey,
     slots: usize,
 ) -> Result<Ledger> {
+
     let space = Ledger::space(slots);
     anchor_lang::system_program::create_account(
         CpiContext::new_with_signer(
@@ -276,7 +333,7 @@ pub fn create_ledger_account_sized<'info>(
     )?;
 
     let mut ledger = Ledger::default();
-    ledger.init(owner.key(), is_pda(&owner.key()), bump, slots);
+    ledger.init(owner.key(), is_pda(&owner.key()), bump, rent_payer, slots);
     Ok(ledger)
 }
 

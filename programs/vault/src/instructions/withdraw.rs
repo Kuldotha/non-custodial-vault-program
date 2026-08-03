@@ -46,7 +46,7 @@ pub fn handler(ctx: Context<Withdraw>, mint: Pubkey, amount: u64) -> Result<()> 
     // move *tokens* in and out directly while SOL stayed impossible.
     require!(
         !is_pda(&ctx.accounts.owner.key()),
-        VaultError::ProgramLedgerMustSettle
+        VaultError::OffCurveOwnerNotAllowed
     );
 
     let ledger = &mut ctx.accounts.ledger;

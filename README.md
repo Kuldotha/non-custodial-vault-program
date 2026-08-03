@@ -95,6 +95,8 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 |---|---|---|---|
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
 | `open_ledger` | basenet | owner + payer | opens an empty ledger at a chosen size; the only way a PDA gets one |
+| `open_permission` | basenet | owner + payer | makes a ledger private. Optional — only needed before delegating |
+| `close_permission` | basenet | owner + rent payer | gives that privacy up again |
 | `deposit` | basenet | owner | wallet → ledger; opens the ledger and its permission on first use. Wallets only |
 | `withdraw` | basenet | owner | ledger → wallet, same owner only. Wallets only |
 | `settle` | either | the debited side | moves a balance between two ledgers, at most one of them human |
@@ -102,7 +104,7 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 | `settle_receipt` | rollup | nobody | applies a receipt, then hands it back to its author |
 | `delegate_ledger` | basenet | payer + owner | hands the ledger to a rollup validator |
 | `undelegate` | rollup | payer | commits the ledger back to basenet |
-| `close_ledger` | basenet | owner | sweeps everything out and refunds all rent |
+| `close_ledger` | basenet | owner + rent payer | sweeps everything out and refunds all rent |
 
 There is deliberately no `grow`, no `create_permission` and no `commit_ledger`. A wallet's ledger
 is created by the deposit that first needs it, grows from inside `deposit`, and gets its
@@ -195,7 +197,13 @@ System transfer. Hence `open_ledger`, which creates an empty one at a chosen siz
 paid by somebody else. Size it for every mint the program will ever pay out — there is no later
 growth, because the settles that fill it move value rather than rent.
 
-Its permission is created as `[owner, the program behind it]`, both derived — the program read off
+Each ledger records a **rent payer**: where its rent goes when it closes, and the only account
+that may grow it. For a wallet that is the wallet. For a PDA it is the **upgrade authority of the
+program behind it**, derived from the account's owner and that program's ProgramData rather than
+taken from the caller — a PDA cannot hold rent usefully, so the holder is whoever controls the
+program. It decides where rent goes home and nothing else; it authorises no movement of value.
+
+`open_permission` creates its permission as `[owner, the program behind it]`, both derived — the program read off
 the account's owner field, never passed. A program has to reach its own ledgers to settle them,
 and the rollup's filter only ever sees an instruction's top-level program, so a PDA in that list
 would not admit it. The payer is deliberately absent: paying rent for an empty account credits

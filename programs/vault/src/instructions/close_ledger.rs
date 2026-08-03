@@ -4,8 +4,12 @@ use ephemeral_rollups_sdk::access_control::instructions::ClosePermissionCpiBuild
 
 use crate::state::*;
 
-/// Sweeps everything back to the owner and closes both the ledger and its permission
-/// account, refunding all rent.
+/// Sweeps every balance back to the owner and closes both the ledger and its permission
+/// account.
+///
+/// The **rent** goes to whoever put it up, not to the owner — see `Ledger::rent_payer`. For a
+/// wallet those are the same account; for a sponsored PDA they are not, and routing it any other
+/// way would turn sponsoring a ledger into a way of handing its owner money.
 ///
 /// Every non-zero token entry must be paid out in the same transaction, so its
 /// `(vault_token, owner_token)` pair is passed in `remaining_accounts` **in entry order**.
@@ -20,9 +24,15 @@ pub struct CloseLedger<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
+    /// Receives the rent back and must sign. Recorded when the ledger was opened; for a
+    /// wallet's ledger it is the owner, so this is the owner signing twice over.
+    #[account(mut)]
+    pub rent_payer: Signer<'info>,
+
     #[account(
         mut,
-        close = owner,
+        close = rent_payer,
+        constraint = ledger.rent_payer == rent_payer.key() @ VaultError::OffCurveOwnerNotAllowed,
         seeds = [b"ledger", owner.key().as_ref()],
         bump = ledger.bump,
         has_one = owner,
@@ -131,7 +141,8 @@ pub fn handler<'info>(
     let ledger_info = ctx.accounts.ledger.to_account_info();
     let perm_program = ctx.accounts.permission_program.to_account_info();
     let perm_info = ctx.accounts.permission.to_account_info();
-    let payer_info = ctx.accounts.owner.to_account_info();
+    // The permission's rent goes home the same way the ledger's does.
+    let payer_info = ctx.accounts.rent_payer.to_account_info();
 
     // Ledgers opened before permissions were created alongside them have none. The permission
     // program panics on an empty account, so a ledger that never had one could never be closed
