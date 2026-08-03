@@ -1,0 +1,25 @@
+[package]
+name = "vault"
+version = "0.1.0"
+description = "An immutable multi-mint ledger primitive with ephemeral-rollup delegation"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vault"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+anchor-spl = "0.31.1"
+# the on-chain curve check: solana-pubkey's bytes_are_curve_point is unimplemented!()
+# for target_os="solana", this one goes through the sol_curve_validate_point syscall
+solana-curve25519 = "2"
+ephemeral-rollups-sdk = { version = "0.14.4", features = ["anchor-compat", "access-control"] }
