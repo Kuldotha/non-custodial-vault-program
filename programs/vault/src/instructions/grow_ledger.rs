@@ -25,20 +25,21 @@ pub struct GrowLedger<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    #[account(
-        mut,
-        seeds = [b"ledger", owner.key().as_ref()],
-        bump = ledger.bump,
-        has_one = owner,
-    )]
-    pub ledger: Account<'info, Ledger>,
+    /// CHECK: loaded and written by hand. As `Account<Ledger>` this would silently do nothing:
+    /// Anchor serialises its own copy on exit, after the handler, so the grown `entries` vector
+    /// would be overwritten by the original's shorter one — the account keeps the extra bytes and
+    /// the rent, and `capacity()` still reports the old count.
+    #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
+    pub ledger: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
 
 pub fn handler(ctx: Context<GrowLedger>, min_free: u16, step: u16) -> Result<()> {
     let info = ctx.accounts.ledger.to_account_info();
-    let mut ledger = ctx.accounts.ledger.clone().into_inner();
+    let mut ledger = load_ledger(&info)?;
+    // The seeds constraint re-derives the address; this is what `has_one = owner` was doing.
+    require_keys_eq!(ledger.owner, ctx.accounts.owner.key(), VaultError::BadLedgerOwner);
 
     ensure_headroom(
         &info,
@@ -49,7 +50,5 @@ pub fn handler(ctx: Context<GrowLedger>, min_free: u16, step: u16) -> Result<()>
         step,
     )?;
 
-    // The account grew underneath Anchor, so write the longer ledger out by hand — its own
-    // serialisation on exit would still be sized for the shorter one.
     store_ledger(&info, &ledger)
 }
