@@ -4,9 +4,9 @@ A non-custodial, multi-asset balance program for Solana, built to work inside
 [MagicBlock](https://magicblock.gg) ephemeral rollups — including **private** ones, where the
 validator runs in a TEE and account data is not world-readable.
 
-The problem it solves: a game wants to take a fee and pay a prize, thousands of times, without a
-basenet transaction per action and without ever holding the player's money. The usual answer is a
-custodial escrow account per game. This isn't that.
+The problem it solves: an app wants to charge its users and pay them out, thousands of times,
+without a basenet transaction per action and without ever holding their money. The usual answer
+is a custodial escrow account per app. This isn't that.
 
 > **Status: devnet.** Deployed at `9vDAQgdHWCPQZabumgcuwoSLzWnRyQkSM1EHQnW8YXjs`, upgrade
 > authority **not** burned. Unaudited. Don't put real money in it.
@@ -44,9 +44,9 @@ Everything else follows from four rules:
 2. **The debited side authorises.** A human authorises by signing. A program authorises by
    `invoke_signed` over its own seeds, which it can only do for a ledger it owns. So a program
    cannot debit a human, and cannot debit another program. A *credit* needs no signature, which
-   is what lets a game pay out to a player who has closed the app.
-3. **Never two human ledgers in a movement.** Program to program is fine — a game moving a share
-   of each sale into a jackpot it cannot later drain. Human to human is unrepresentable.
+   is what lets a program pay out to a user who has closed the app.
+3. **Never two human ledgers in a movement.** Program to program is fine — a program moving a
+   share of each sale into a prize pool it cannot later drain. Human to human is unrepresentable.
 4. **A program's ledger is never deposited to or withdrawn from.** Off-curve owners are
    refused by both instructions. Value reaches a program only through `settle`.
 
@@ -78,8 +78,8 @@ require!(src.pda_auth || dst.pda_auth, VaultError::NotProgramMediated);
 
 It looks like it wants adjusting — tightened to `src.pda_auth != dst.pda_auth`, exactly one
 program side, or dropped in favour of "whoever is debited signs" alone. Neither survives
-inspection: the XOR would forbid program-to-program settlement, which is legitimate (the jackpot
-above), and the signature rule on its own makes Alice-pays-Bob expressible in a single
+inspection: the XOR would forbid program-to-program settlement, which is legitimate (the prize
+pool above), and the signature rule on its own makes Alice-pays-Bob expressible in a single
 instruction. The OR plus rule 2 give both properties; a tidy-up that merges them removes one
 silently.
 
@@ -173,8 +173,8 @@ For SOL the two token slots carry the System Program as a placeholder and are ne
 
 ### A program's treasury
 
-A program can own ledgers — as many as it has PDAs. A game's house and jackpot are two ledgers of
-the same program.
+A program can own ledgers — as many as it has PDAs. A treasury and a prize pool are two ledgers
+of the same program.
 
 **Neither is ever deposited to or withdrawn from.** `deposit` and `withdraw` refuse an off-curve
 owner outright, so the only way value reaches or leaves a program is `settle` against a human who
@@ -208,8 +208,8 @@ derived — the program is read off the ledger account's owner field, never pass
 to reach its own ledgers to settle them, and the rollup's filter only ever sees an instruction's
 top-level program, so a permission naming the PDA alone would not admit it.
 
-That is what a jackpot is built from. The game settles into `["jackpot"]` on every sale and out of
-it only on a win, and simply never writes an instruction that settles it anywhere else. There is
+That is what a prize pool is built from. The program settles into it on every sale and out of it
+only on a payout, and simply never writes an instruction that settles it anywhere else. There is
 then no way to drain it, by anyone, ever — enforced by the absence of code rather than by a check
 somebody could relax.
 
@@ -244,32 +244,32 @@ The catch, established by testing rather than documentation:
 > signatures are never consulted. CPI'd programs are invisible, because the filter runs before
 > execution.
 
-The vault is a member of every ledger by virtue of owning it. A *game* CPI-ing into the vault is
-not — and cannot be, without every ledger enumerating every game in advance (the permission
+The vault is a member of every ledger by virtue of owning it. A *program* CPI-ing into the vault
+is not — and cannot be, without every ledger enumerating every caller in advance (the permission
 account holds 16 members, fixed at creation).
 
 MagicBlock's position is correct and forced: any program handed an account can read its bytes and
 copy them out, and CPI hands data over on entry. There is no "pass through without reading".
 
-**The receipt is the way around it without weakening any of that.** Instead of the game calling
-the vault with the ledgers, the two are separated into different instructions:
+**The receipt is the way around it without weakening any of that.** Instead of the calling
+program touching the ledgers, the two are separated into different instructions:
 
 ```
-ix 0   game.request_purchase   →  CPI vault.create_receipt
-                                  writes {human, authority, movements[]} to an ephemeral account.
-                                  No ledger is present, so nothing is permissioned.
+ix 0   program.request      →  CPI vault.create_receipt
+                               writes {human, authority, movements[]} to an ephemeral account.
+                               No ledger is present, so nothing is permissioned.
 
-ix 1   vault.settle_receipt     →  top-level, so the filter admits it.
-                                  Applies the movements, zeroes the receipt, and assigns it to
-                                  the game.
+ix 1   vault.settle_receipt →  top-level, so the filter admits it.
+                               Applies the movements, zeroes the receipt, and assigns it to
+                               the program.
 
-ix 2   game.buy_card            →  the receipt is now game-owned. That ownership *is* the proof
-                                  the settle happened — the game could not have been given it
-                                  otherwise. Consume it and reclaim the rent.
+ix 2   program.deliver      →  the receipt is now the program's. That ownership *is* the proof
+                               the settle happened — it could not have been given the receipt
+                               otherwise. Consume it and reclaim the rent.
 ```
 
-All three in one transaction, so it is atomic: the card cannot exist unpaid, and the payment
-cannot happen without the card.
+All three in one transaction, so it is atomic: nothing is delivered unpaid, and the payment
+cannot happen without the delivery.
 
 `settle_receipt` requires no signature. Consent was captured when the receipt was written — the
 program signed for its PDA, and the human signed if any movement debits them. A receipt that only
