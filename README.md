@@ -57,21 +57,9 @@ Everything else follows from four rules:
 
 Rules 3 and 4 together are what make this not a payments program. `withdraw` sends only to the
 ledger's owner, `deposit` credits only the depositor — both refuse a program's ledger outright —
-and `settle`, the one place two ledgers touch at all, never accepts two human sides. The vault
-exposes no peer-to-peer instruction.
-
-That claim has a precise edge, and it is worth knowing where it is. The vault cannot stop value
-moving between people through primitives Solana provides regardless: deploy a stub program,
-settle into its ledger, hand its upgrade authority to another wallet with `set_authority`, and
-they can upgrade it into something that settles the balance back out to themselves. That route
-runs through the loader, not through anything here — whoever controls a program controls what its
-treasury does, and `solana program close --recipient` and plain System transfers move value
-between wallets all day. What the vault does is narrower, and deliberate: it offers no
-instruction *of its own* that moves value from one person to another. A program that lets
-strangers pay each other is doing something quite different, legally, from one that lets each
-person move their own balance in and out and spend it with a program — this vault is the second
-thing. Peer-to-peer payment belongs in a separate program, written by someone who has decided to
-take that on.
+and `settle`, the one place two ledgers touch at all, never accepts two human sides. Each person
+moves their own balance in and out and spends it with a program; peer-to-peer payment belongs in
+a separate program, written by someone who has decided to take that on.
 
 In code, rule 3 is a single asymmetric check:
 
