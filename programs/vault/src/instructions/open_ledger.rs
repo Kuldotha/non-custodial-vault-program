@@ -1,4 +1,6 @@
 use anchor_lang::prelude::*;
+use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
+use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
 
 use crate::state::*;
 
@@ -30,8 +32,13 @@ use crate::state::*;
 /// the only key that may grow it. Without that, paying somebody's rent would be a way to hand
 /// them value — slowly, but genuinely.
 ///
-/// Because the PDA no longer has to pay, it can stay **program-owned**, which is what lets
-/// `open_permission` read the program off it afterwards.
+/// Because the PDA no longer has to pay, it can stay **program-owned**, which is what lets the
+/// permission name the program that owns it.
+///
+/// The permission is created here, with the ledger, and dies with it in `close_ledger`. Privacy
+/// is the vault's to enforce rather than each program's to negotiate: a ledger that could be made
+/// readable by whoever delegated it would leave programs opening and closing permissions against
+/// each other, never settling. One lifecycle, no verbs of its own.
 #[derive(Accounts)]
 #[instruction(slots: u16)]
 pub struct OpenLedger<'info> {
@@ -48,6 +55,13 @@ pub struct OpenLedger<'info> {
     /// CHECK: created here and validated by hand — see `create_ledger_account`.
     #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
     pub ledger: UncheckedAccount<'info>,
+
+    /// CHECK: the ledger's permission, created here alongside it.
+    #[account(mut)]
+    pub permission: UncheckedAccount<'info>,
+
+    /// CHECK: the MagicBlock permission program.
+    pub permission_program: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -68,5 +82,22 @@ pub fn handler(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
         ctx.bumps.ledger,
         slots as usize,
     )?;
-    store_ledger(&ledger_info, &ledger)
+    store_ledger(&ledger_info, &ledger)?;
+
+    // Named members: the owner, plus the program that owns it when the owner is a PDA — which is
+    // how a game reaches the ledgers it owns inside a private rollup.
+    let owner_info = ctx.accounts.owner.to_account_info();
+    let mut members = vec![Member { flags: 0, pubkey: ctx.accounts.owner.key() }];
+    if *owner_info.owner != anchor_lang::system_program::ID {
+        members.push(Member { flags: 0, pubkey: *owner_info.owner });
+    }
+
+    CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
+        .permissioned_account(&ledger_info)
+        .permission(&ctx.accounts.permission.to_account_info())
+        .payer(&ctx.accounts.payer.to_account_info())
+        .system_program(&ctx.accounts.system_program.to_account_info())
+        .args(MembersArgs { members: Some(members) })
+        .invoke_signed(&[&[b"ledger", ctx.accounts.owner.key().as_ref(), &[ctx.bumps.ledger]]])
+        .map_err(|_| error!(VaultError::PermissionFailed))
 }

@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
-use anchor_lang::system_program;
-use anchor_spl::token::{self, Token, Transfer};
 use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
 use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use anchor_lang::system_program;
+use anchor_spl::token::{self, Token, Transfer};
 
 use crate::state::*;
 
@@ -16,7 +16,7 @@ use crate::state::*;
 ///
 /// - **the ledger** is created if absent. There is no public `create_ledger`, so a ledger
 ///   cannot exist in a state this instruction did not produce;
-/// - **the permission** is created if absent, which makes "no ledger is ever readable in a
+/// - **the permission is created if absent**, which makes "no ledger is ever readable in a
 ///   rollup" structural rather than a check `delegate` has to remember to make;
 /// - **headroom** is topped up, because a delegated ledger cannot be reallocated and
 ///   `settle` inside the rollup can only claim slots that already exist.
@@ -100,10 +100,15 @@ pub fn handler(
         load_ledger(&ledger_info)?
     };
 
-    // Before the ledger can hold anything it must be unreadable in a rollup. Creating the
-    // permission here — rather than in a separate instruction a caller could skip — is what
-    // removes the window in which a ledger exists unprotected. It needs the ledger account
-    // to exist and carry its discriminator, so write the fresh state out first.
+    // Created here, unconditionally, rather than left to whoever later delegates.
+    //
+    // A permission cannot be added to a delegated ledger — `OpenPermission` takes it as
+    // `Account<Ledger>`, and while delegated the delegation program owns it — so repairing a
+    // missing one means undelegate, create, delegate. For the whole time it was wrong the ledger
+    // sat on a private validator readable by anyone holding a token, and nobody would have known.
+    //
+    // The rent comes back when the ledger closes, so a wallet that never touches a private
+    // validator has lent 567 bytes, not spent them. That is the cheaper mistake.
     if ctx.accounts.permission.data_is_empty() {
         store_ledger(&ledger_info, &ledger)?;
         create_permission(&ctx, ledger.owner, ledger.bump)?;
@@ -167,46 +172,22 @@ pub fn handler(
     store_ledger(&ledger_info, &ledger)
 }
 
-/// Creates the ledger's basenet permission naming exactly one member at **flags 0**: the
-/// owner. That is why a player can read their own balance inside a private rollup.
-///
-/// Nothing else is named, and no caller can add to the list. The vault reaches every ledger
-/// it owns without being named — owning the permissioned account is enough — so `settle`
-/// writing two ledgers at once needs no extra membership. Anything a caller could add here
-/// would be a third party admitted to a private ledger for the life of the account, decided
-/// by whoever happened to open it.
-///
-/// Flags 0 is deliberate. The flag set is `AUTHORITY`, `TX_LOGS`, `TX_BALANCES`,
-/// `TX_MESSAGE`, `ACCOUNT_SIGNATURES`; none of them is a read flag, so membership alone is
-/// what grants the read. Granting `AUTHORITY` would let an owner rewrite their own ACL and
-/// so expose a ledger this program is supposed to keep private — in code that can never be
-/// patched, that has to be impossible rather than discouraged. Every ledger's privacy is
-/// therefore fixed at creation and no instruction can widen it.
-///
-/// Deliberately the basenet permission, not the ephemeral one. An ephemeral permission is
-/// created inside the rollup — after the account is already delegated and live there —
-/// which leaves a window in which the ledger is readable. Creating it on basenet closes
-/// that window entirely: the rollup copies the basenet permission data when it needs it,
-/// so the permission is never delegated and has no commit lifecycle.
-fn create_permission(
-    ctx: &Context<Deposit>,
-    owner: Pubkey,
-    bump: u8,
-) -> Result<()> {
-    let ledger_info = ctx.accounts.ledger.to_account_info();
+/// Creates the ledger's permission, naming its owner at flags 0 — and the owner's program too
+/// when the owner is a PDA, so a program can reach the ledgers it owns.
+fn create_permission(ctx: &Context<Deposit>, owner: Pubkey, bump: u8) -> Result<()> {
+    let owner_info = ctx.accounts.owner.to_account_info();
+    let mut members = vec![Member { flags: 0, pubkey: owner }];
+    if *owner_info.owner != anchor_lang::system_program::ID {
+        members.push(Member { flags: 0, pubkey: *owner_info.owner });
+    }
 
+    let ledger_info = ctx.accounts.ledger.to_account_info();
     CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
         .permissioned_account(&ledger_info)
         .permission(&ctx.accounts.permission.to_account_info())
         .payer(&ctx.accounts.owner.to_account_info())
         .system_program(&ctx.accounts.system_program.to_account_info())
-        .args(MembersArgs {
-            members: Some(vec![Member { flags: 0, pubkey: owner }]),
-        })
+        .args(MembersArgs { members: Some(members) })
         .invoke_signed(&[&[b"ledger", owner.as_ref(), &[bump]]])
-        .map_err(|e| {
-            error!(VaultError::PermissionFailed)
-                .with_source(source!())
-                .with_values(("cpi", e.to_string()))
-        })
+        .map_err(|_| error!(VaultError::PermissionFailed))
 }

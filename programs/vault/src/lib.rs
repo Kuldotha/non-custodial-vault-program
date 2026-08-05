@@ -49,17 +49,6 @@ pub mod vault {
         instructions::grow_ledger::handler(ctx, min_free, step)
     }
 
-    /// Makes a ledger private. Optional — only a ledger bound for a private rollup needs it,
-    /// and `delegate_ledger` is where that becomes non-negotiable.
-    pub fn open_permission(ctx: Context<OpenPermission>) -> Result<()> {
-        instructions::open_permission::handler(ctx)
-    }
-
-    /// TEMPORARY. Closes a ledger's permission so a stuck one can be undelegated.
-    pub fn close_permission(ctx: Context<ClosePermission>) -> Result<()> {
-        instructions::close_permission::handler(ctx)
-    }
-
     pub fn deposit(
         ctx: Context<Deposit>,
         mint: Pubkey,

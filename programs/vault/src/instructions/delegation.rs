@@ -19,19 +19,19 @@ pub struct DelegateLedger<'info> {
     #[account(mut, del)]
     pub ledger: AccountInfo<'info>,
 
-    /// CHECK: the ledger's basenet permission account. Must already exist and be owned by the
-    /// permission program, or the ledger would be readable in the rollup until one lands.
+    /// CHECK: the ledger's permission, when it has one. Unread here — see the handler.
     pub permission: UncheckedAccount<'info>,
 }
 
 pub fn delegate_handler(ctx: Context<DelegateLedger>, validator: Option<Pubkey>) -> Result<()> {
-    // Refuse to delegate an unprotected ledger: the permission has to be on basenet *first*.
-    let perm = &ctx.accounts.permission;
-    require!(
-        perm.owner == &ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID
-            && !perm.data_is_empty(),
-        crate::state::VaultError::MissingPermission
-    );
+    // No permission is required. This vault settles across rollup boundaries and gates who may
+    // pay; it does not decide who may read. Whoever delegates a ledger chooses its destination,
+    // so whoever delegates is the only party that can know whether privacy is needed — and on an
+    // ordinary rollup a permission does nothing but cost rent.
+    //
+    // A ledger bound for a private validator must therefore have `open_permission` called first,
+    // by the client. Requiring one here proved only that an account existed, not that anything
+    // was protected.
 
     ctx.accounts.delegate_ledger(
         &ctx.accounts.payer,
