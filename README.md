@@ -103,7 +103,11 @@ silently.
 
 The permission has no verbs of its own: it is created with the ledger and dies with it, so a
 ledger and its privacy share one lifecycle and there is never a window in which a delegated
-ledger sits readable. There is likewise no `commit_ledger` — commit is implicit in `undelegate`.
+ledger sits readable. There is likewise no `commit_ledger`, for two reasons: commit is implicit
+in `undelegate`, and a commit writes the ledger's current state to basenet, where it is
+world-readable. On a private rollup its absence is what keeps the play-by-play inside the
+validator — basenet sees one aggregate change when the session ends, never the states in
+between.
 
 ### PDAs
 
