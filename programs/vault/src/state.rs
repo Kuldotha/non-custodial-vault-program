@@ -20,6 +20,33 @@ pub const MAX_SLOTS: u16 = 256;
 
 pub const ENTRY_SIZE: usize = 32 + 8;
 
+/// Ledger layout version, kept in `_pad[0]`. Version 1 appends a 64-byte authorization
+/// trailer at the very end of the account — past the borsh region, so the `Ledger` struct,
+/// every existing decoder, and Anchor's exit serialization never see it. The trailer is
+/// `authorized (32) | authority (32)`: a session key that may consent to debits of this
+/// ledger, and the one program authority whose receipts it may consent to.
+pub const LEDGER_V_AUTHORIZED: u8 = 1;
+pub const AUTH_TRAILER: usize = 64;
+/// `_pad` starts here: 8 discriminator + 32 owner + 1 pda_auth + 1 bump.
+const VERSION_OFFSET: usize = 42;
+
+/// The ledger's session-key authorization, or None — for a v0 ledger, or a cleared one.
+/// An all-zero key is the explicit "not set": it can never be confused with a grant,
+/// because assign refuses to write it as anything but a revocation.
+pub fn read_authorization(info: &AccountInfo) -> Result<Option<(Pubkey, Pubkey)>> {
+    let data = info.try_borrow_data()?;
+    if data.len() < Ledger::HEADER + AUTH_TRAILER || data[VERSION_OFFSET] != LEDGER_V_AUTHORIZED {
+        return Ok(None);
+    }
+    let o = data.len() - AUTH_TRAILER;
+    let key = Pubkey::new_from_array(data[o..o + 32].try_into().unwrap());
+    if key == Pubkey::default() {
+        return Ok(None);
+    }
+    let authority = Pubkey::new_from_array(data[o + 32..o + 64].try_into().unwrap());
+    Ok(Some((key, authority)))
+}
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, PartialEq)]
 pub struct Entry {
     pub mint: Pubkey,
@@ -157,6 +184,12 @@ pub enum VaultError {
     OwnerNotPda,
     #[msg("The seeds do not derive the owner under the claimed member program")]
     MemberProgramMismatch,
+    #[msg("A program ledger cannot carry a session key — only wallets delegate consent")]
+    CannotAuthorizePdaLedger,
+    #[msg("The authorized key must be on-curve, and the authority must be set")]
+    BadAuthorizedKey,
+    #[msg("The signer is neither the debited ledger's owner nor its session key for this authority")]
+    NotAuthorizedToConsent,
 }
 
 /// The reserve for a mint is the vault PDA's **associated** token account. This program never
@@ -233,10 +266,21 @@ pub fn ensure_headroom<'info>(
     }
     require!(step > 0 && step <= MAX_GROW_STEP, VaultError::BadSlotCount);
 
+    // The trailer lives at the end of the account, which is exactly where growth happens —
+    // save it before the resize and put it back at the new end, or the new entries would
+    // land on top of it and the authorization would decay into garbage.
+    let trailer: Option<[u8; AUTH_TRAILER]> = if ledger._pad[0] == LEDGER_V_AUTHORIZED {
+        let d = info.try_borrow_data()?;
+        Some(d[d.len() - AUTH_TRAILER..].try_into().unwrap())
+    } else {
+        None
+    };
+
     for _ in 0..step {
         ledger.entries.push(Entry::default());
     }
-    let new_space = Ledger::space(ledger.capacity());
+    let new_space =
+        Ledger::space(ledger.capacity()) + if trailer.is_some() { AUTH_TRAILER } else { 0 };
 
     let needed = Rent::get()?.minimum_balance(new_space);
     let have = info.lamports();
@@ -253,6 +297,11 @@ pub fn ensure_headroom<'info>(
         )?;
     }
     info.resize(new_space)?;
+    if let Some(t) = trailer {
+        let mut d = info.try_borrow_mut_data()?;
+        let o = d.len() - AUTH_TRAILER;
+        d[o..].copy_from_slice(&t);
+    }
     Ok(())
 }
 

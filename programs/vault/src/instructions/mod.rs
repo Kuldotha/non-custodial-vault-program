@@ -7,6 +7,7 @@ pub mod deposit;
 pub mod withdraw;
 pub mod settle;
 pub mod receipt;
+pub mod authorize;
 pub mod delegation;
 pub mod close_ledger;
 
@@ -19,5 +20,6 @@ pub use deposit::*;
 pub use withdraw::*;
 pub use settle::*;
 pub use receipt::*;
+pub use authorize::*;
 pub use delegation::*;
 pub use close_ledger::*;

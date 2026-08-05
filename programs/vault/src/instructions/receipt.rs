@@ -12,13 +12,17 @@ use crate::state::*;
 /// CPI. It can reach *this* — no permissioned account is involved — and the vault then does the
 /// settle itself, where it is top-level and always a member.
 ///
-/// Both consents are captured here, at the one moment when signing is free:
-/// - **human** signs when a movement debits them, so a charge of theirs can never be conjured
-///   by a program later. A receipt that only credits them — a payout — takes nothing from
-///   them and needs no consent, which is what lets any throwaway key submit a collect.
-/// - **authority** signs, which is the program committing to the terms
+/// Only the **program's** consent is captured here: the authority signs via `invoke_signed`,
+/// committing to the terms. The human's consent for a debit is checked at settle instead —
+/// against the debited ledger, which this instruction deliberately cannot read (it is the
+/// permissioned account), and which is the only place that knows who may consent: the owner,
+/// or the session key the owner assigned for this authority.
 ///
-/// After this, settling needs no signature from anyone: the receipt is the evidence.
+/// Creation is therefore human-permissionless: a program can write a receipt debiting anyone,
+/// and it means nothing until someone entitled to consent signs the settle. An existing open
+/// receipt at the same nonce is overwritten — only this authority can ever write at its own
+/// addresses, and the real flows create and settle in one transaction, so whatever was
+/// sitting there is debris from a flow that never finished.
 ///
 /// Layout: `state | human | authority | count | (mint, amount, to_human) * count`
 
@@ -30,8 +34,8 @@ pub const RECEIPT_SETTLED: u8 = 1;
 #[derive(Accounts)]
 #[instruction(nonce: u64)]
 pub struct CreateReceipt<'info> {
-    /// CHECK: the party on the human side. Must sign when any movement debits them — the
-    /// consent that makes a later signature-free settle safe.
+    /// CHECK: the party on the human side. Named, never required to sign — consent for a
+    /// debit is the settle's business, checked against this party's ledger there.
     pub human: UncheckedAccount<'info>,
 
     /// CHECK: the program's authority PDA. Must sign, which a game does via `invoke_signed`;
@@ -57,12 +61,6 @@ pub fn create_handler(
     nonce: u64,
     movements: Vec<Movement>,
 ) -> Result<()> {
-    // Consent is for debits. A movement out of the human's ledger must carry their signature;
-    // a receipt that only credits them takes nothing from them and needs none.
-    require!(
-        movements.iter().all(|m| m.to_human) || ctx.accounts.human.is_signer,
-        VaultError::MissingUserSignature
-    );
     require!(ctx.accounts.authority.is_signer, VaultError::MissingProgramSignature);
     // An empty receipt is allowed. A losing card authorises nothing, and the caller still
     // needs the account to exist — the runtime rejects a transaction that declares a writable
@@ -74,13 +72,22 @@ pub fn create_handler(
     let nonce_le = nonce.to_le_bytes();
     let len = RECEIPT_HEADER + movements.len() * MOVEMENT_SIZE;
 
-    EphemeralAccount::new(
-        &ctx.accounts.authority.to_account_info(),
-        &ctx.accounts.receipt.to_account_info(),
-        &ctx.accounts.ephemeral_vault.to_account_info(),
-    )
-    .with_signer_seeds(&[&[b"receipt", authority_key.as_ref(), &nonce_le, &[bump]]])
-    .create(len as u32)?;
+    let receipt_info = ctx.accounts.receipt.to_account_info();
+    let authority_info = ctx.accounts.authority.to_account_info();
+    let vault_info = ctx.accounts.ephemeral_vault.to_account_info();
+    let bump_arr = [bump];
+    let seeds: [&[u8]; 4] = [b"receipt", authority_key.as_ref(), &nonce_le, &bump_arr];
+    let signer_seeds = [&seeds[..]];
+    let account = EphemeralAccount::new(&authority_info, &receipt_info, &vault_info)
+        .with_signer_seeds(&signer_seeds);
+    // Overwrite, never fail: a vault-owned account at this address can only be an OPEN
+    // receipt this same authority once wrote and abandoned. Settled receipts leave vault
+    // ownership before anything else can run, so they cannot be sitting here.
+    if receipt_info.data_len() == 0 {
+        account.create(len as u32)?;
+    } else if receipt_info.data_len() != len {
+        account.resize(len as u32)?;
+    }
 
     let mut d = ctx.accounts.receipt.try_borrow_mut_data()?;
     d[0] = RECEIPT_OPEN;
@@ -106,8 +113,16 @@ pub struct Movement {
     pub to_human: bool,
 }
 
-/// Settles a receipt. **Needs no signature** — both parties consented when it was created, and
-/// neither ledger can be substituted, because the receipt names their owners.
+/// Settles a receipt. The program side consented at creation (its `invoke_signed`), and the
+/// human side consents **here**, where the debited ledger is finally in hand: any movement
+/// that debits the human requires `consenter` to sign and to be either the ledger's owner or
+/// the session key its owner assigned — for this receipt's authority, not just any program.
+/// A credit-only receipt still needs no signature at all, which is what keeps collects
+/// permissionless. Neither ledger can be substituted, because the receipt names their owners.
+///
+/// A debit of an off-curve human side is unrepresentable now: a PDA cannot sign a top-level
+/// instruction and a PDA ledger can never hold a session key. No live flow ever did that —
+/// programs pay each other through `settle` — and the door is better closed.
 ///
 /// Afterwards the receipt is emptied and handed to the program that authorised it, so that
 /// program can close it and recover the rent it sponsored. The vault cannot close it itself:
@@ -140,6 +155,11 @@ pub struct SettleReceipt<'info> {
         bump = program_ledger.bump,
     )]
     pub program_ledger: Account<'info, Ledger>,
+
+    /// CHECK: whoever consents to the debit of the human side — the ledger's owner, or its
+    /// assigned session key. Only examined when a movement debits the human; a credit-only
+    /// receipt ignores it entirely, so a collect passes any account here, unsigned.
+    pub consenter: UncheckedAccount<'info>,
 }
 
 pub fn settle_handler(ctx: Context<SettleReceipt>) -> Result<()> {
@@ -172,6 +192,20 @@ pub fn settle_handler(ctx: Context<SettleReceipt>) -> Result<()> {
     // Neither side is caller-chosen: the receipt names both owners.
     require_keys_eq!(ctx.accounts.human_ledger.owner, human, VaultError::BadAuthority);
     require_keys_eq!(ctx.accounts.program_ledger.owner, authority, VaultError::BadAuthority);
+
+    // The human side's consent, deferred from creation to the one instruction that holds
+    // their ledger. The session key is program-locked: it counts only for receipts of the
+    // authority the owner named, so a key leaked from one game consents to nothing else.
+    if movements.iter().any(|m| !m.to_human) {
+        let consenter = &ctx.accounts.consenter;
+        require!(consenter.is_signer, VaultError::MissingUserSignature);
+        let allowed = consenter.key() == human
+            || read_authorization(&ctx.accounts.human_ledger.to_account_info())?
+                .is_some_and(|(key, for_authority)| {
+                    key == consenter.key() && for_authority == authority
+                });
+        require!(allowed, VaultError::NotAuthorizedToConsent);
+    }
     // The same two rules as `settle`, and for the same reasons — see the long note there.
     // Never two humans, and both sides consented when the receipt was written: the program
     // signed for its PDA, the human signed if debited.

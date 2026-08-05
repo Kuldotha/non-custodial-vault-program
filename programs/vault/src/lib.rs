@@ -98,7 +98,8 @@ pub mod vault {
         instructions::settle::handler(ctx, mint, amount)
     }
 
-    /// Creates a receipt — an ephemeral, vault-owned account holding authorised terms.
+    /// Creates a receipt — an ephemeral, vault-owned account holding the program's side of
+    /// the terms. Human-permissionless: a debit means nothing until its settle is consented.
     pub fn create_receipt(
         ctx: Context<CreateReceipt>,
         nonce: u64,
@@ -107,10 +108,21 @@ pub mod vault {
         instructions::receipt::create_handler(ctx, nonce, movements)
     }
 
-    /// Settles a receipt. Needs no signature: both parties consented at creation, and the
-    /// receipt names both ledger owners so neither can be substituted.
+    /// Settles a receipt. A debit of the human side requires the consenter to sign — the
+    /// ledger's owner, or its session key for this receipt's authority. Credits need nobody.
     pub fn settle_receipt(ctx: Context<SettleReceipt>) -> Result<()> {
         instructions::receipt::settle_handler(ctx)
+    }
+
+    /// Grants or revokes a session key that may consent to debits of a wallet ledger, locked
+    /// to a single program authority. basenet only; the owner signs and funds the trailer.
+    /// An all-zero key revokes.
+    pub fn assign_ledger_authorization(
+        ctx: Context<AssignLedgerAuthorization>,
+        authorized: Pubkey,
+        authority: Pubkey,
+    ) -> Result<()> {
+        instructions::authorize::handler(ctx, authorized, authority)
     }
 
     /// Sweeps everything back to the owner, then closes the ledger and its permission.
