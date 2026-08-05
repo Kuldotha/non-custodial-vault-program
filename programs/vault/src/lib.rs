@@ -49,6 +49,17 @@ pub mod vault {
         instructions::grow_ledger::handler(ctx, min_free, step)
     }
 
+    /// Deletes a ledger's permission — the owner explicitly giving privacy up, for a ledger
+    /// that is meant to be watched. The only way a ledger becomes public.
+    pub fn make_public(ctx: Context<MakePublic>) -> Result<()> {
+        instructions::privacy::make_public_handler(ctx)
+    }
+
+    /// Takes it back: recreates the permission with the standard member set.
+    pub fn make_private(ctx: Context<MakePrivate>) -> Result<()> {
+        instructions::privacy::make_private_handler(ctx)
+    }
+
     pub fn deposit(
         ctx: Context<Deposit>,
         mint: Pubkey,

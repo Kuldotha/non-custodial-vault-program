@@ -1,6 +1,7 @@
 pub mod initialize_vault;
 pub mod grow_ledger;
 pub mod open_ledger;
+pub mod privacy;
 pub mod deposit;
 pub mod withdraw;
 pub mod settle;
@@ -11,6 +12,7 @@ pub mod close_ledger;
 pub use initialize_vault::*;
 pub use grow_ledger::*;
 pub use open_ledger::*;
+pub use privacy::*;
 pub use deposit::*;
 pub use withdraw::*;
 pub use settle::*;

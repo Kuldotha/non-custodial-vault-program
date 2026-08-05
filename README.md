@@ -83,6 +83,8 @@ merges them removes one silently.
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
 | `open_ledger` | basenet | owner + payer | an empty ledger at a chosen size (max 256 slots), with its permission |
 | `grow_ledger` | basenet | owner + rent payer | adds slots |
+| `make_public` | basenet | owner + rent payer | deletes the ledger's permission — privacy explicitly given up |
+| `make_private` | basenet | owner + rent payer | recreates it, with the standard members |
 | `deposit` | basenet | owner | wallet → ledger, wallets only; creates the ledger and its permission on first use |
 | `withdraw` | basenet | owner | ledger → the owner's wallet, wallets only |
 | `settle` | either | the debited side | moves a balance between two ledgers, never two humans |
@@ -92,13 +94,19 @@ merges them removes one silently.
 | `undelegate` | rollup | payer | commits the ledger back to basenet |
 | `close_ledger` | basenet | owner + rent payer | sweeps everything out, closes the permission, refunds the rent |
 
-The permission has no verbs of its own: it is created with the ledger and dies with it, so a
-ledger and its privacy share one lifecycle and there is never a window in which a ledger
-delegated to a private rollup sits readable. There is likewise no `commit_ledger`, for two reasons: commit is implicit
-in `undelegate`, and a commit writes the ledger's current state to basenet, where it is
-world-readable. On a private rollup its absence is what keeps the play-by-play inside the
-validator — basenet sees one aggregate change when the session ends, never the states in
-between.
+The permission is created with the ledger and dies with it, so a ledger and its privacy share
+one lifecycle and there is never a window in which a ledger delegated to a private rollup sits
+readable. A PDA's permission names the owner, its program, and its **rent payer** — a PDA and
+its program cannot sign an RPC challenge, so the sponsor is what keeps a program's ledger
+readable by its operator. The only verbs privacy has are the explicit opt-out: `make_public`
+deletes the permission, for the rare ledger that is *meant* to be watched — a progressive pot
+is worthless as a secret, and a public copy of the figure would be a second number free to
+drift — and `make_private` takes it back.
+
+There is no `commit_ledger`, for two reasons: commit is implicit in `undelegate`, and a commit
+writes the ledger's current state to basenet, where it is world-readable. On a private rollup
+its absence is what keeps the play-by-play inside the validator — basenet sees one aggregate
+change when the session ends, never the states in between.
 
 ### PDAs
 
@@ -194,10 +202,12 @@ to the owner and paying somebody's rent would otherwise be a way to hand them mo
 pay, so whoever does becomes the rent payer — the lamports return to them, which is what makes
 sponsoring a program's ledger free of that problem.
 
-The permission a PDA's ledger gets at `open_ledger` names `[owner, the program behind it]`, both
-derived — the program is read off the ledger account's owner field, never passed. A program has
-to reach its own ledgers to settle them, and the rollup's filter only ever sees an instruction's
-top-level program, so a permission naming the PDA alone would not admit it.
+The permission a PDA's ledger gets at `open_ledger` names `[owner, the program behind it, the
+rent payer]`, all derived — the program is read off the ledger account's owner field, never
+passed. The program is named because it has to reach its own ledgers to settle them, and the
+rollup's filter only ever sees an instruction's top-level program. The rent payer is named
+because it is the one member that can sign an RPC challenge: without the sponsor, a program's
+ledger is a book nobody — including its operator — can open.
 
 That is what a prize pool is built from. The program settles into it on every sale and out of it
 only on a payout, and simply never writes an instruction that settles it anywhere else. There is
@@ -226,7 +236,7 @@ then delegate again.
 
 In a private rollup, an account can carry a **permission** listing who may see it. A wallet's
 ledger names exactly one member — its owner — which is what lets a player read their own balance
-and nobody else read it. A PDA's names the PDA and its program, as above.
+and nobody else read it. A PDA's names the PDA, its program, and its sponsor, as above.
 
 The catch, established by testing rather than documentation:
 
