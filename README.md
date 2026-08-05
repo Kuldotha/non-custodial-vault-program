@@ -69,10 +69,10 @@ require!(src.pda_auth || dst.pda_auth, VaultError::NotProgramMediated);
 
 It looks like it wants adjusting — tightened to `src.pda_auth != dst.pda_auth`, exactly one
 program side, or dropped in favour of "whoever is debited signs" alone. Neither survives
-inspection: the XOR would forbid program-to-program settlement, which is legitimate (the prize
-pool above), and the signature rule on its own makes Alice-pays-Bob expressible in a single
-instruction. The OR plus rule 2 give both properties; a tidy-up that merges them removes one
-silently.
+inspection: the XOR would forbid program-to-program settlement, which is legitimate — a protocol
+sweeping its fees into its own treasury — and the signature rule on its own makes Alice-pays-Bob
+expressible in a single instruction. The OR plus rule 2 give both properties; a tidy-up that
+merges them removes one silently.
 
 ---
 
