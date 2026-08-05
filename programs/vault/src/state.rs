@@ -151,6 +151,12 @@ pub enum VaultError {
     LedgerExists,
     #[msg("This receipt has already been settled")]
     AlreadySettled,
+    #[msg("This instruction is for wallet ledgers — the owner must be on-curve")]
+    OwnerNotWallet,
+    #[msg("This instruction is for program ledgers — the owner must be a PDA")]
+    OwnerNotPda,
+    #[msg("The seeds do not derive the owner under the claimed member program")]
+    MemberProgramMismatch,
 }
 
 /// The reserve for a mint is the vault PDA's **associated** token account. This program never

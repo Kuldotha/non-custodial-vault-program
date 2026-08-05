@@ -1,6 +1,7 @@
 pub mod initialize_vault;
-pub mod grow_ledger;
-pub mod open_ledger;
+pub mod grow_pda_ledger;
+pub mod open_wallet_ledger;
+pub mod open_pda_ledger;
 pub mod privacy;
 pub mod deposit;
 pub mod withdraw;
@@ -10,8 +11,9 @@ pub mod delegation;
 pub mod close_ledger;
 
 pub use initialize_vault::*;
-pub use grow_ledger::*;
-pub use open_ledger::*;
+pub use grow_pda_ledger::*;
+pub use open_wallet_ledger::*;
+pub use open_pda_ledger::*;
 pub use privacy::*;
 pub use deposit::*;
 pub use withdraw::*;

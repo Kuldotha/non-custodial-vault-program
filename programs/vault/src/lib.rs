@@ -37,16 +37,25 @@ pub mod vault {
     /// Also the only way a ledger is created: it opens the ledger and its permission on
     /// first use and keeps the headroom band, so none of those is a separate instruction.
     /// A program opens its own ledger by depositing zero, and grows it the same way.
-    /// Opens an empty ledger. The only way a program's PDA gets one, since it can neither pay
-    /// rent nor source a deposit — it is filled by `settle` afterwards.
-    pub fn open_ledger(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
-        instructions::open_ledger::handler(ctx, slots)
+    /// Opens an empty wallet ledger at a chosen size, owner-funded.
+    pub fn open_wallet_ledger(ctx: Context<OpenWalletLedger>, slots: u16) -> Result<()> {
+        instructions::open_wallet_ledger::handler(ctx, slots)
     }
 
-    /// Adds slots to an existing ledger, funded by the account that opened it. The only way a
-    /// program's ledger grows, since `deposit` refuses an off-curve owner.
-    pub fn grow_ledger(ctx: Context<GrowLedger>, min_free: u16, step: u16) -> Result<()> {
-        instructions::grow_ledger::handler(ctx, min_free, step)
+    /// Opens an empty ledger for a program's PDA, sponsor-funded. The member program is
+    /// proven by deriving the owner from its seeds — a wrong program is unconstructible.
+    pub fn open_pda_ledger(
+        ctx: Context<OpenPdaLedger>,
+        slots: u16,
+        member_program: Pubkey,
+        owner_seeds: Vec<Vec<u8>>,
+    ) -> Result<()> {
+        instructions::open_pda_ledger::handler(ctx, slots, member_program, owner_seeds)
+    }
+
+    /// Adds slots to a program's ledger, funded by its sponsor. Wallets grow through `deposit`.
+    pub fn grow_pda_ledger(ctx: Context<GrowPdaLedger>, min_free: u16, step: u16) -> Result<()> {
+        instructions::grow_pda_ledger::handler(ctx, min_free, step)
     }
 
     /// Deletes a ledger's permission — the owner explicitly giving privacy up, for a ledger
@@ -55,9 +64,18 @@ pub mod vault {
         instructions::privacy::make_public_handler(ctx)
     }
 
-    /// Takes it back: recreates the permission with the standard member set.
-    pub fn make_private(ctx: Context<MakePrivate>) -> Result<()> {
-        instructions::privacy::make_private_handler(ctx)
+    /// Takes it back for a wallet: the permission returns, naming the owner.
+    pub fn make_wallet_ledger_private(ctx: Context<MakeWalletLedgerPrivate>) -> Result<()> {
+        instructions::privacy::make_wallet_ledger_private_handler(ctx)
+    }
+
+    /// Takes it back for a program's PDA, with the same proof `open_pda_ledger` demands.
+    pub fn make_pda_ledger_private(
+        ctx: Context<MakePdaLedgerPrivate>,
+        member_program: Pubkey,
+        owner_seeds: Vec<Vec<u8>>,
+    ) -> Result<()> {
+        instructions::privacy::make_pda_ledger_private_handler(ctx, member_program, owner_seeds)
     }
 
     pub fn deposit(

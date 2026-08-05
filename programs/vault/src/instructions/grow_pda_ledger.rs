@@ -2,11 +2,12 @@ use anchor_lang::prelude::*;
 
 use crate::state::*;
 
-/// Adds slots to an existing ledger.
+/// Adds slots to an existing **program** ledger.
 ///
 /// `deposit` grows a wallet's ledger as it goes, but it refuses an off-curve owner — so without
-/// this a program's ledger is stuck at whatever `open_ledger` gave it, and a game that adds a
-/// fifteenth payout token has nowhere to put it.
+/// this a program's ledger is stuck at whatever `open_pda_ledger` gave it, and a game that adds
+/// a fifteenth payout token has nowhere to put it. Wallets have no business here, and the
+/// off-curve assertion says so instead of leaving it implied.
 ///
 /// Nothing about the rent model changes. The rent payer recorded at creation is the only account
 /// that may fund the increase, and the whole amount still comes back to them when the ledger is
@@ -17,8 +18,8 @@ use crate::state::*;
 /// still returns every balance to the owner and the rent to the payer. Handling that case would
 /// mean letting `rent_payer` change, which is the thing that keeps rent uninteresting.
 #[derive(Accounts)]
-pub struct GrowLedger<'info> {
-    /// CHECK: the ledger's owner — a wallet, or a program's PDA signing via invoke_signed.
+pub struct GrowPdaLedger<'info> {
+    /// CHECK: the program's PDA, signing via invoke_signed.
     pub owner: Signer<'info>,
 
     /// Funds the extra slots. `ensure_headroom` requires it to be the recorded rent payer.
@@ -35,7 +36,8 @@ pub struct GrowLedger<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<GrowLedger>, min_free: u16, step: u16) -> Result<()> {
+pub fn handler(ctx: Context<GrowPdaLedger>, min_free: u16, step: u16) -> Result<()> {
+    require!(is_pda(&ctx.accounts.owner.key()), VaultError::OwnerNotPda);
     let info = ctx.accounts.ledger.to_account_info();
     let mut ledger = load_ledger(&info)?;
     // The seeds constraint re-derives the address; this is what `has_one = owner` was doing.

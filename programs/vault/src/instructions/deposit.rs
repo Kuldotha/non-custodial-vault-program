@@ -172,14 +172,11 @@ pub fn handler(
     store_ledger(&ledger_info, &ledger)
 }
 
-/// Creates the ledger's permission, naming its owner at flags 0 — and the owner's program too
-/// when the owner is a PDA, so a program can reach the ledgers it owns.
+/// Creates the ledger's permission, naming its owner at flags 0.
 fn create_permission(ctx: &Context<Deposit>, owner: Pubkey, bump: u8) -> Result<()> {
-    let owner_info = ctx.accounts.owner.to_account_info();
-    let mut members = vec![Member { flags: 0, pubkey: owner }];
-    if *owner_info.owner != anchor_lang::system_program::ID {
-        members.push(Member { flags: 0, pubkey: *owner_info.owner });
-    }
+    // One member: the owner. Deposit refuses off-curve owners, so the PDA branch that used
+    // to live here was dead code wearing a decision's clothes.
+    let members = vec![Member { flags: 0, pubkey: owner }];
 
     let ledger_info = ctx.accounts.ledger.to_account_info();
     CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
