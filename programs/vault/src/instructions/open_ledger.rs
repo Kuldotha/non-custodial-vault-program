@@ -16,10 +16,6 @@ use crate::state::*;
 /// path in and out of the vault: open the ledger once, then settle. Nothing about a program's
 /// treasury is a different shape from anyone else's.
 ///
-/// No permission is created here. A ledger that stays on basenet, or is delegated to an ordinary
-/// rollup, needs none — and paying rent for one is pure waste in those cases. Privacy is opted
-/// into with `open_permission`, which `delegate_ledger` then insists on.
-///
 /// `slots` sizes it up front, capped at [`MAX_SLOTS`]. A game paying out fourteen tokens wants
 /// room for fourteen at creation rather than growing a slot at a time, and unlike `deposit` there
 /// is no later call to grow it — the settles that fill it move value, not rent. The cap is there
@@ -84,12 +80,16 @@ pub fn handler(ctx: Context<OpenLedger>, slots: u16) -> Result<()> {
     )?;
     store_ledger(&ledger_info, &ledger)?;
 
-    // Named members: the owner, plus the program that owns it when the owner is a PDA — which is
-    // how a game reaches the ledgers it owns inside a private rollup.
+    // Named members: the owner, and for a PDA also the program that owns it — which is how a
+    // game reaches the ledgers it owns inside a private rollup — and the rent payer. The payer
+    // is the ledger's sponsor, and the sponsor may see what it sponsors: a PDA and its program
+    // cannot sign an RPC challenge, so without a human member a program's ledger is a book
+    // nobody — including its operator — can open. A wallet's ledger names the owner alone.
     let owner_info = ctx.accounts.owner.to_account_info();
     let mut members = vec![Member { flags: 0, pubkey: ctx.accounts.owner.key() }];
     if *owner_info.owner != anchor_lang::system_program::ID {
         members.push(Member { flags: 0, pubkey: *owner_info.owner });
+        members.push(Member { flags: 0, pubkey: ctx.accounts.payer.key() });
     }
 
     CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
