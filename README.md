@@ -10,6 +10,9 @@ is a custodial escrow account per app. This isn't that.
 
 > **Status: devnet.** Deployed at `9vDAQgdHWCPQZabumgcuwoSLzWnRyQkSM1EHQnW8YXjs`, upgrade
 > authority **not** burned. Unaudited. Don't put real money in it.
+>
+> This repository is the reference for that one instance. The intent is a single live vault,
+> ultimately unowned — not a program you deploy yourself.
 
 ---
 
@@ -278,29 +281,6 @@ submitted by an unfunded throwaway key. Either way the receipt names both ledger
 whoever submits it cannot substitute either side.
 
 ---
-
-## Build, deploy
-
-```bash
-cargo build-sbf
-solana program deploy target/deploy/vault.so \
-  --program-id target/deploy/vault-keypair.json \
-  --upgrade-authority <authority.json> --url devnet
-```
-
-Verify the deploy landed — a failed deploy prints a signature and leaves the old binary live:
-
-```bash
-solana program dump <PROGRAM_ID> /tmp/onchain.so --url devnet
-head -c "$(stat -f%z target/deploy/vault.so)" /tmp/onchain.so | shasum -a256
-shasum -a256 target/deploy/vault.so
-```
-
-Check for orphaned buffer accounts afterwards; a failed upgrade strands their rent:
-
-```bash
-solana program show --buffers --url devnet -k <authority.json>
-```
 
 ## Talking to a private rollup
 
