@@ -172,10 +172,9 @@ pub fn settle_handler(ctx: Context<SettleReceipt>) -> Result<()> {
     // Neither side is caller-chosen: the receipt names both owners.
     require_keys_eq!(ctx.accounts.human_ledger.owner, human, VaultError::BadAuthority);
     require_keys_eq!(ctx.accounts.program_ledger.owner, authority, VaultError::BadAuthority);
-    // The XOR, unchanged: exactly one program side and one human side.
     // The same two rules as `settle`, and for the same reasons — see the long note there.
-    // At most one human, and both sides consented when the receipt was written: the human
-    // signed, the program signed for its PDA.
+    // Never two humans, and both sides consented when the receipt was written: the program
+    // signed for its PDA, the human signed if debited.
     //
     // `human_ledger` is a name for the common case, not a constraint: it may itself be a
     // program's ledger, which is how one program pays another (a game moving a share of each

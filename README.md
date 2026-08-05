@@ -37,7 +37,7 @@ from the depositor.
 The tokens themselves live in one **reserve** — PDA `["vault"]` — holding SOL directly and SPL
 tokens in its associated token accounts. A ledger is a claim on the reserve, not a container.
 
-Everything else follows from three rules:
+Everything else follows from four rules:
 
 1. **A withdrawal's destination is derived from the signer, never passed.** There is no way to
    spell a withdrawal to somebody else, so a bug in a calling program cannot redirect funds.
@@ -45,47 +45,43 @@ Everything else follows from three rules:
    `invoke_signed` over its own seeds, which it can only do for a ledger it owns. So a program
    cannot debit a human, and cannot debit another program. A *credit* needs no signature, which
    is what lets a game pay out to a player who has closed the app.
-3. **At most one human ledger in a movement.** Two human ledgers may never meet, in either
-   direction.
+3. **Never two human ledgers in a movement.** Program to program is fine — a game moving a share
+   of each sale into a jackpot it cannot later drain. Human to human is unrepresentable.
 4. **A program's ledger is never deposited to or withdrawn from.** Off-curve owners are
    refused by both instructions. Value reaches a program only through `settle`.
 
-### Rule 3 is the one that matters most
+### No instruction pays one person another
 
-It is what makes this not a payments program: **no instruction here takes value from one person
-and gives it to another.** `withdraw` sends only to the ledger's owner and `deposit`
-credits only the depositor — both refuse a program's ledger outright — so `settle` is the only
-place two ledgers touch at all, and refusing two human sides there closes the last door.
+Rules 3 and 4 together are what make this not a payments program. `withdraw` sends only to the
+ledger's owner, `deposit` credits only the depositor — both refuse a program's ledger outright —
+and `settle`, the one place two ledgers touch at all, never accepts two human sides. The vault
+exposes no peer-to-peer instruction.
 
-Stated precisely, because the honest version is narrower than the slogan: the vault exposes no
-peer-to-peer instruction. It cannot stop value moving between people *through* primitives Solana
-provides regardless. Somebody can deploy a stub program, settle into its ledger, hand the upgrade
-authority to another wallet with `set_authority`, and let them upgrade it into something that
-settles the balance back out to themselves. That is a transfer, and it is available whether or not
-this program exists — `solana program close --recipient` pays programdata rent to any address, and
-System transfers move SOL between wallets all day. Any program holding balances composes with
-those, because whoever controls a program controls what its treasury does.
+That claim has a precise edge, and it is worth knowing where it is. The vault cannot stop value
+moving between people through primitives Solana provides regardless: deploy a stub program,
+settle into its ledger, hand its upgrade authority to another wallet with `set_authority`, and
+they can upgrade it into something that settles the balance back out to themselves. That route
+runs through the loader, not through anything here — whoever controls a program controls what its
+treasury does, and `solana program close --recipient` and plain System transfers move value
+between wallets all day. What the vault does is narrower, and deliberate: it offers no
+instruction *of its own* that moves value from one person to another. A program that lets
+strangers pay each other is doing something quite different, legally, from one that lets each
+person move their own balance in and out and spend it with a program — this vault is the second
+thing. Peer-to-peer payment belongs in a separate program, written by someone who has decided to
+take that on.
 
-The vault does not try to prevent it, and could not: it cannot tell a game from a stub, and the
-route runs through the loader rather than through anything here. What it can do — and does — is
-offer no instruction of its own that moves value from one person to another.
-
-That has consequences well beyond the code. A program that lets strangers pay each other is doing
-something quite different, legally, from one that lets each person move their own balance in and
-out and spend it with a program. This vault is deliberately the second thing. Peer-to-peer payment
-belongs in a separate program, written by someone who has decided to take that on.
-
-The check is therefore asymmetric on purpose:
+In code, rule 3 is a single asymmetric check:
 
 ```rust
 require!(src.pda_auth || dst.pda_auth, VaultError::NotProgramMediated);
 ```
 
-It looks like it wants to be `src.pda_auth != dst.pda_auth`, or like the signature rule alone
-should be enough. Neither is true. The XOR forbids program-to-program movement, which is
-legitimate — a game moving a share of each sale into a jackpot account it cannot later drain.
-"Whoever is debited signs", on its own, makes Alice-pays-Bob expressible in a single instruction.
-Only the pair of rules gives both properties, and a tidy-up that merges them removes one silently.
+It looks like it wants adjusting — tightened to `src.pda_auth != dst.pda_auth`, exactly one
+program side, or dropped in favour of "whoever is debited signs" alone. Neither survives
+inspection: the XOR would forbid program-to-program settlement, which is legitimate (the jackpot
+above), and the signature rule on its own makes Alice-pays-Bob expressible in a single
+instruction. The OR plus rule 2 give both properties; a tidy-up that merges them removes one
+silently.
 
 ---
 
@@ -94,23 +90,20 @@ Only the pair of rules gives both properties, and a tidy-up that merges them rem
 | instruction | where | who signs | what it does |
 |---|---|---|---|
 | `initialize_vault` | basenet | upgrade authority | creates the reserve, once |
-| `open_ledger` | basenet | owner + payer | opens an empty ledger at a chosen size (max 256 slots); the only way a PDA gets one |
-| `grow_ledger` | basenet | owner + rent payer | adds slots to an existing ledger |
-| `open_permission` | basenet | owner + payer | makes a ledger private. Optional — only needed before delegating |
-| `close_permission` | basenet | owner + rent payer | gives that privacy up again |
-| `deposit` | basenet | owner | wallet → ledger; opens the ledger and its permission on first use. Wallets only |
-| `withdraw` | basenet | owner | ledger → wallet, same owner only. Wallets only |
-| `settle` | either | the debited side | moves a balance between two ledgers, at most one of them human |
-| `create_receipt` | rollup | human + program | writes an agreed set of movements to an ephemeral account |
-| `settle_receipt` | rollup | nobody | applies a receipt, then hands it back to its author |
-| `delegate_ledger` | basenet | payer + owner | hands the ledger to a rollup validator |
+| `open_ledger` | basenet | owner + payer | an empty ledger at a chosen size (max 256 slots), with its permission |
+| `grow_ledger` | basenet | owner + rent payer | adds slots |
+| `deposit` | basenet | owner | wallet → ledger, wallets only; creates the ledger and its permission on first use |
+| `withdraw` | basenet | owner | ledger → the owner's wallet, wallets only |
+| `settle` | either | the debited side | moves a balance between two ledgers, never two humans |
+| `create_receipt` | rollup | program; the human if debited | writes agreed movements to an ephemeral account |
+| `settle_receipt` | rollup | nobody | applies a receipt, hands it back to its author |
+| `delegate_ledger` | basenet | owner + payer | hands the ledger to a rollup validator |
 | `undelegate` | rollup | payer | commits the ledger back to basenet |
-| `close_ledger` | basenet | owner + rent payer | sweeps everything out and refunds all rent |
+| `close_ledger` | basenet | owner + rent payer | sweeps everything out, closes the permission, refunds the rent |
 
-There is deliberately no `create_permission` and no `commit_ledger`. A wallet's ledger
-is created by the deposit that first needs it, grows from inside `deposit`, and gets its
-permission at creation; commit is implicit in `undelegate`. `open_ledger` exists only because a
-PDA can do none of that for itself.
+The permission has no verbs of its own: it is created with the ledger and dies with it, so a
+ledger and its privacy share one lifecycle and there is never a window in which a delegated
+ledger sits readable. There is likewise no `commit_ledger` — commit is implicit in `undelegate`.
 
 ### PDAs
 
@@ -195,10 +188,10 @@ people would hide.
 
 What a PDA cannot do is open its own ledger: it holds no lamports for rent and cannot sign a
 System transfer. Hence `open_ledger`, which creates an empty one at a chosen size with the rent
-paid by somebody else. Capped at 256 slots, since rent scales with the count and is paid up front. It can be extended
-later with `grow_ledger`, funded by the same account that opened it — `deposit` grows a wallet's
-ledger as it goes but refuses an off-curve owner, so that is the only way a program's ledger
-grows.
+paid by somebody else. Capped at 256 slots, since rent scales with the count and is paid up
+front. It can be extended later with `grow_ledger`, funded by the same account that opened it —
+`deposit` grows a wallet's ledger as it goes but refuses an off-curve owner, so that is the only
+way a program's ledger grows.
 
 Each ledger records a **rent payer**: where its rent goes when it closes, and the only account
 that may grow it. A wallet funds its own ledger and nobody else may, because the rent comes back
@@ -206,11 +199,10 @@ to the owner and paying somebody's rent would otherwise be a way to hand them mo
 pay, so whoever does becomes the rent payer — the lamports return to them, which is what makes
 sponsoring a program's ledger free of that problem.
 
-`open_permission` creates its permission as `[owner, the program behind it]`, both derived — the program read off
-the account's owner field, never passed. A program has to reach its own ledgers to settle them,
-and the rollup's filter only ever sees an instruction's top-level program, so a PDA in that list
-would not admit it. The payer is deliberately absent: paying rent for an empty account credits
-nobody and buys no visibility.
+The permission a PDA's ledger gets at `open_ledger` names `[owner, the program behind it]`, both
+derived — the program is read off the ledger account's owner field, never passed. A program has
+to reach its own ledgers to settle them, and the rollup's filter only ever sees an instruction's
+top-level program, so a permission naming the PDA alone would not admit it.
 
 That is what a jackpot is built from. The game settles into `["jackpot"]` on every sale and out of
 it only on a win, and simply never writes an instruction that settles it anywhere else. There is
@@ -237,9 +229,9 @@ then delegate again.
 
 ## Privacy, and the receipt pattern
 
-In a private rollup, an account can carry a **permission** listing who may see it. A ledger's
-permission names exactly one member: its owner. That is what lets a player read their own balance
-and nobody else read it.
+In a private rollup, an account can carry a **permission** listing who may see it. A wallet's
+ledger names exactly one member — its owner — which is what lets a player read their own balance
+and nobody else read it. A PDA's names the PDA and its program, as above.
 
 The catch, established by testing rather than documentation:
 
@@ -275,8 +267,10 @@ ix 2   game.buy_card            →  the receipt is now game-owned. That ownersh
 All three in one transaction, so it is atomic: the card cannot exist unpaid, and the payment
 cannot happen without the card.
 
-`settle_receipt` requires no signature. Both parties consented when the receipt was written — the
-human signed, the program signed for its PDA — and the receipt names both ledger owners, so
+`settle_receipt` requires no signature. Consent was captured when the receipt was written — the
+program signed for its PDA, and the human signed if any movement debits them. A receipt that only
+credits the human took nothing from them and needed no consent, which is what lets a payout be
+submitted by an unfunded throwaway key. Either way the receipt names both ledger owners, so
 whoever submits it cannot substitute either side.
 
 ---
@@ -329,9 +323,11 @@ programs/vault/src/
   state.rs                  Ledger, slot allocation, headroom, errors
   instructions/
     initialize_vault.rs
-    deposit.rs              creates the ledger and its permission; grows it
+    open_ledger.rs          a PDA's ledger, with its permission
+    grow_ledger.rs
+    deposit.rs              creates a wallet's ledger and its permission; grows it
     withdraw.rs
-    settle.rs               the human/program XOR
+    settle.rs               the never-two-humans rule
     receipt.rs              create_receipt, settle_receipt
     delegation.rs           delegate_ledger, undelegate
     close_ledger.rs

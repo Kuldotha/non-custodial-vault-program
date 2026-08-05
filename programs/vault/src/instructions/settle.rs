@@ -5,7 +5,7 @@ use crate::state::*;
 /// The only instruction that moves value between accounts — and it is pure bookkeeping.
 /// The reserves are never touched, which is why it works unchanged inside the rollup.
 ///
-/// The XOR below is the whole point of this program: exactly one side must be a program,
+/// The check below is the whole point of this program: at least one side must be a program,
 /// so there is no instruction sequence here that moves value from one human to another.
 #[derive(Accounts)]
 pub struct Settle<'info> {
