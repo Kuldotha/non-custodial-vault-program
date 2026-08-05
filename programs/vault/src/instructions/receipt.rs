@@ -13,7 +13,9 @@ use crate::state::*;
 /// settle itself, where it is top-level and always a member.
 ///
 /// Both consents are captured here, at the one moment when signing is free:
-/// - **human** signs, so a debit of theirs can never be conjured by a program later
+/// - **human** signs when a movement debits them, so a charge of theirs can never be conjured
+///   by a program later. A receipt that only credits them — a payout — takes nothing from
+///   them and needs no consent, which is what lets any throwaway key submit a collect.
 /// - **authority** signs, which is the program committing to the terms
 ///
 /// After this, settling needs no signature from anyone: the receipt is the evidence.
@@ -28,8 +30,8 @@ pub const RECEIPT_SETTLED: u8 = 1;
 #[derive(Accounts)]
 #[instruction(nonce: u64)]
 pub struct CreateReceipt<'info> {
-    /// CHECK: the party on the human side. Must sign — this is the consent that makes a later
-    /// signature-free settle safe.
+    /// CHECK: the party on the human side. Must sign when any movement debits them — the
+    /// consent that makes a later signature-free settle safe.
     pub human: UncheckedAccount<'info>,
 
     /// CHECK: the program's authority PDA. Must sign, which a game does via `invoke_signed`;
@@ -55,7 +57,12 @@ pub fn create_handler(
     nonce: u64,
     movements: Vec<Movement>,
 ) -> Result<()> {
-    require!(ctx.accounts.human.is_signer, VaultError::MissingUserSignature);
+    // Consent is for debits. A movement out of the human's ledger must carry their signature;
+    // a receipt that only credits them takes nothing from them and needs none.
+    require!(
+        movements.iter().all(|m| m.to_human) || ctx.accounts.human.is_signer,
+        VaultError::MissingUserSignature
+    );
     require!(ctx.accounts.authority.is_signer, VaultError::MissingProgramSignature);
     // An empty receipt is allowed. A losing card authorises nothing, and the caller still
     // needs the account to exist — the runtime rejects a transaction that declares a writable
