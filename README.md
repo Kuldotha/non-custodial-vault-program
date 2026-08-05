@@ -93,8 +93,8 @@ merges them removes one silently.
 | `close_ledger` | basenet | owner + rent payer | sweeps everything out, closes the permission, refunds the rent |
 
 The permission has no verbs of its own: it is created with the ledger and dies with it, so a
-ledger and its privacy share one lifecycle and there is never a window in which a delegated
-ledger sits readable. There is likewise no `commit_ledger`, for two reasons: commit is implicit
+ledger and its privacy share one lifecycle and there is never a window in which a ledger
+delegated to a private rollup sits readable. There is likewise no `commit_ledger`, for two reasons: commit is implicit
 in `undelegate`, and a commit writes the ledger's current state to basenet, where it is
 world-readable. On a private rollup its absence is what keeps the play-by-play inside the
 validator — basenet sees one aggregate change when the session ends, never the states in
