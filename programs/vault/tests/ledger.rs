@@ -14,9 +14,11 @@ fn fresh() -> Ledger {
         pda_auth: false,
         bump: 0,
         _pad: [0; 6],
+        rent_payer: Pubkey::default(),
         entries: vec![],
     };
-    l.init(Pubkey::new_unique(), false, 255, DEFAULT_SLOTS as usize);
+    let owner = Pubkey::new_unique();
+    l.init(owner, false, 255, owner, DEFAULT_SLOTS as usize);
     l
 }
 
