@@ -1,43 +1,40 @@
-use anchor_lang::prelude::*;
+use borsh::BorshDeserialize;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program_error::ProgramError,
+    pubkey::Pubkey,
+};
 
-use crate::state::*;
+use crate::error::VaultError;
+use crate::state::Ledger;
+use crate::utils::account::ensure_headroom;
+use crate::utils::pda::{self, is_pda};
 
-/// Adds slots to an existing **program** ledger. Wallets grow through `deposit`, which refuses
-/// an off-curve owner, so this is the only way a program's ledger gets bigger.
-///
-/// Only the recorded `rent_payer` may fund the increase and it never changes, so a sponsor who
-/// has gone away leaves the ledger at its current size — the price of never letting rent cross
-/// between parties.
-#[derive(Accounts)]
-pub struct GrowPdaLedger<'info> {
-    pub owner: Signer<'info>,
-
-    /// Funds the extra slots. `ensure_headroom` requires it to be the recorded rent payer.
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    /// CHECK: loaded and written by hand — see `ensure_headroom` for why `Account<Ledger>`
-    /// cannot be used here.
-    #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
-    pub ledger: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
+#[derive(BorshDeserialize)]
+struct Args {
+    min_free: u16,
+    slot_increase: u16,
 }
 
-pub fn handler(ctx: Context<GrowPdaLedger>, min_free: u16, slot_increase: u16) -> Result<()> {
-    require!(is_pda(&ctx.accounts.owner.key()), VaultError::OwnerNotPda);
-    let info = ctx.accounts.ledger.to_account_info();
-    let mut ledger = load_ledger(&info)?;
-    require_keys_eq!(ledger.owner, ctx.accounts.owner.key(), VaultError::BadLedgerOwner);
+/// Adds slots to a program ledger, funded by its recorded rent payer. basenet only.
+/// Accounts: [owner, payer, ledger, system_program]
+pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let Args { min_free, slot_increase } =
+        Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [owner, payer, ledger_ai, system_program, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer || !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if !is_pda(owner.key) {
+        return Err(VaultError::OwnerNotPda.into());
+    }
+    pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
 
-    ensure_headroom(
-        &info,
-        &mut ledger,
-        &ctx.accounts.payer,
-        &ctx.accounts.system_program,
-        min_free,
-        slot_increase,
-    )?;
-
-    store_ledger(&info, &ledger)
+    let mut l = Ledger::load_checked(ledger_ai, program_id)?;
+    if l.owner != *owner.key {
+        return Err(VaultError::BadLedgerOwner.into());
+    }
+    ensure_headroom(ledger_ai, &mut l, payer, system_program, min_free, slot_increase)?;
+    l.store(ledger_ai)
 }

@@ -1,69 +1,76 @@
-use anchor_lang::prelude::*;
+use borsh::BorshDeserialize;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program_error::ProgramError,
+    pubkey::Pubkey,
+};
 
-use crate::instructions::open_pda_ledger::verify_pda_owner;
-use crate::state::*;
+use crate::error::VaultError;
+use crate::state::Ledger;
+use crate::utils::pda::{self, is_pda, verify_pda_owner};
 
-/// Grants — or revokes, with an all-zero key — a session key that may consent to debits of
-/// this ledger.
-///
-/// Neither side may be a program: not the ledger, not the key. A program consents by
-/// `invoke_signed` over its own seeds and nothing else, and a session key standing in for
-/// that is the one capability the vault must never hand out.
-///
-/// The key is unscoped — any program may write a receipt against this ledger — so it is full
-/// spending authority over the balance. It cannot reach the wallet behind it: `withdraw`
-/// derives its ledger from the signer. Revoking a leaked key means undelegating first, since
-/// Anchor's owner check keeps this to basenet.
-#[derive(Accounts)]
-pub struct AssignLedgerAuthorization<'info> {
-    #[account(
-        mut,
-        seeds = [b"ledger", owner.key().as_ref()],
-        bump = ledger.bump,
-        has_one = owner,
-    )]
-    pub ledger: Account<'info, Ledger>,
-    pub owner: Signer<'info>,
+#[derive(BorshDeserialize)]
+struct AssignArgs {
+    authorized: Pubkey,
 }
 
-pub fn handler(ctx: Context<AssignLedgerAuthorization>, authorized: Pubkey) -> Result<()> {
-    let ledger = &mut ctx.accounts.ledger;
-    require!(!ledger.pda_auth, VaultError::CannotAuthorizePdaLedger);
+/// Grants or revokes (all-zero key) a wallet ledger's session key. basenet only; the owner signs.
+/// Accounts: [ledger, owner]
+pub fn assign_handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let AssignArgs { authorized } =
+        AssignArgs::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [ledger_ai, owner, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
 
-    require!(
-        authorized == Pubkey::default() || !is_pda(&authorized),
-        VaultError::BadAuthorizedKey
-    );
-
-    ledger.authorized = authorized;
-    Ok(())
+    let mut l = Ledger::load_checked(ledger_ai, program_id)?;
+    if l.owner != *owner.key {
+        return Err(VaultError::BadLedgerOwner.into());
+    }
+    if l.pda_auth {
+        return Err(VaultError::CannotAuthorizePdaLedger.into());
+    }
+    if authorized != Pubkey::default() && is_pda(&authorized) {
+        return Err(VaultError::BadAuthorizedKey.into());
+    }
+    l.authorized = authorized;
+    l.store(ledger_ai)
 }
 
-/// Backfills a PDA ledger's stored authority — the member program it belongs to — for ledgers
-/// opened before that field was written. The owner PDA signs and its seeds derive it under
-/// `member_program`, so only the true program can set it, to its own key.
-#[derive(Accounts)]
-#[instruction(member_program: Pubkey, owner_seeds: Vec<Vec<u8>>)]
-pub struct AuthorizePdaLedger<'info> {
-    pub owner: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [b"ledger", owner.key().as_ref()],
-        bump = ledger.bump,
-        has_one = owner,
-    )]
-    pub ledger: Account<'info, Ledger>,
-}
-
-pub fn authorize_pda_handler(
-    ctx: Context<AuthorizePdaLedger>,
+#[derive(BorshDeserialize)]
+struct AuthorizePdaArgs {
     member_program: Pubkey,
     owner_seeds: Vec<Vec<u8>>,
-) -> Result<()> {
-    verify_pda_owner(&ctx.accounts.owner, &member_program, &owner_seeds)?;
-    let ledger = &mut ctx.accounts.ledger;
-    require!(ledger.pda_auth, VaultError::OwnerNotPda);
-    ledger.authorized = member_program;
-    Ok(())
+}
+
+/// Backfills a PDA ledger's stored member program. The owner PDA signs and its seeds prove it.
+/// Accounts: [owner, ledger]
+pub fn authorize_pda_handler(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    let AuthorizePdaArgs { member_program, owner_seeds } =
+        AuthorizePdaArgs::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [owner, ledger_ai, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
+    verify_pda_owner(owner.key, &member_program, &owner_seeds)?;
+
+    let mut l = Ledger::load_checked(ledger_ai, program_id)?;
+    if l.owner != *owner.key {
+        return Err(VaultError::BadLedgerOwner.into());
+    }
+    if !l.pda_auth {
+        return Err(VaultError::OwnerNotPda.into());
+    }
+    l.authorized = member_program;
+    l.store(ledger_ai)
 }

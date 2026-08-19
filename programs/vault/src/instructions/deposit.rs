@@ -1,172 +1,104 @@
-use anchor_lang::prelude::*;
-use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
-use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use borsh::BorshDeserialize;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program::invoke,
+    program_error::ProgramError, pubkey::Pubkey,
+};
+use solana_system_interface::instruction as system_instruction;
+
+use ephemeral_rollups_sdk::access_control::structs::Member;
 use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
-use anchor_lang::system_program;
-use anchor_spl::token::{self, Token, Transfer};
 
-use crate::state::*;
+use crate::constants::{DEFAULT_MIN_FREE, DEFAULT_SLOTS, SOL_MINT, TOKEN_PROGRAM_ID};
+use crate::error::VaultError;
+use crate::state::Ledger;
+use crate::utils::account::{create_ledger_account, ensure_headroom};
+use crate::utils::pda::{self, is_pda};
+use crate::utils::permission;
+use crate::utils::reserve::{require_reserve, token_fields, vault_floor};
+use crate::utils::spl;
 
-/// Wallet → vault. One instruction for both assets: `mint` selects, and on the SOL path the
-/// token slots are placeholders that are never read, so the account layout stays fixed.
-///
-/// Three things happen besides the transfer, all idempotent and none of them worth a separate
-/// instruction: the ledger is created if absent, its permission is created if absent, and
-/// headroom is topped up — a delegated ledger cannot be reallocated, and `settle` inside the
-/// rollup can only use slots that already exist.
-#[derive(Accounts)]
-#[instruction(mint: Pubkey, amount: u64, min_free: Option<u16>, slot_increase: Option<u16>)]
-pub struct Deposit<'info> {
-    /// CHECK: the wallet depositing. Off-curve owners are refused in the handler.
-    #[account(mut)]
-    pub owner: Signer<'info>,
-
-    /// CHECK: validated by hand, and deliberately *not* `init_if_needed` — see
-    /// `create_ledger_account` for why.
-    #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
-    pub ledger: UncheckedAccount<'info>,
-
-    /// CHECK: the ledger's basenet permission account, created here on first use.
-    #[account(mut)]
-    pub permission: UncheckedAccount<'info>,
-
-    /// CHECK: the MagicBlock permission program, pinned to its known address.
-    #[account(address = PERMISSION_PROGRAM_ID)]
-    pub permission_program: UncheckedAccount<'info>,
-
-    /// CHECK: the SOL reserve. A System-owned PDA; holds every deposited lamport.
-    #[account(mut, seeds = [b"vault"], bump)]
-    pub vault: UncheckedAccount<'info>,
-
-    /// CHECK: the SPL reserve for `mint` — the vault's ATA, which the caller must have
-    /// created with `create_idempotent`. Placeholder on the SOL path, so it can carry
-    /// neither a type nor a `mut` constraint; validated by hand in the handler.
-    pub vault_token: UncheckedAccount<'info>,
-
-    /// CHECK: the owner's token account. Placeholder on the SOL path.
-    pub owner_token: UncheckedAccount<'info>,
-
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-}
-
-pub fn handler(
-    ctx: Context<Deposit>,
+#[derive(BorshDeserialize)]
+struct Args {
     mint: Pubkey,
     amount: u64,
     min_free: Option<u16>,
     slot_increase: Option<u16>,
-) -> Result<()> {
-    // Off-curve owners are refused outright — a program's ledger moves value only through
-    // `settle`. That keeps the wallet paying in and the wallet taking delivery the same person,
-    // and it does not lean on the System program refusing to debit a PDA: an SPL transfer needs
-    // only the authority's signature, so without this a PDA could move tokens in and out while
-    // SOL stayed impossible.
-    require!(
-        !is_pda(&ctx.accounts.owner.key()),
-        VaultError::OffCurveOwnerNotAllowed
-    );
+}
+
+/// Wallet → vault. `mint` selects the asset; `SOL_MINT` moves lamports. Creates the ledger and
+/// its permission on first use, and tops up the free-slot band.
+/// Accounts: [owner, ledger, permission, permission_program, vault, vault_token, owner_token,
+///            token_program, system_program]
+pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let Args { mint, amount, min_free, slot_increase } =
+        Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [owner, ledger_ai, permission, permission_program, vault, vault_token, owner_token, token_program, system_program, ..] =
+        accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    // Off-curve owners are refused — a program's ledger moves value only through `settle`.
+    if is_pda(owner.key) {
+        return Err(VaultError::OffCurveOwnerNotAllowed.into());
+    }
+    if *permission_program.key != PERMISSION_PROGRAM_ID || *token_program.key != TOKEN_PROGRAM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
 
     let slot_increase = slot_increase.unwrap_or(DEFAULT_SLOTS);
     let min_free = min_free.unwrap_or(DEFAULT_MIN_FREE);
-    let ledger_info = ctx.accounts.ledger.to_account_info();
+    let bump = pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
+    pda::validate(program_id, vault, &[b"vault"])?;
 
-    let mut ledger = if ctx.accounts.ledger.data_is_empty() {
-        create_ledger_account(
-            &ledger_info,
-            &ctx.accounts.owner,
-            &ctx.accounts.system_program,
-            ctx.bumps.ledger,
-        )?
+    let mut l = if ledger_ai.data_is_empty() {
+        create_ledger_account(ledger_ai, owner, system_program, bump)?
     } else {
-        load_ledger(&ledger_info)?
+        if ledger_ai.owner != program_id {
+            return Err(VaultError::BadLedgerOwner.into());
+        }
+        Ledger::read_from(&ledger_ai.try_borrow_data()?)?
     };
 
-    // Created here, unconditionally, rather than left to whoever later delegates.
-    //
-    // A permission cannot be added to a delegated ledger, so repairing a missing one means
-    // undelegate, create, delegate — and until then the ledger sits on a private validator
-    // readable by anyone holding a token, silently. The rent returns when the ledger closes, so
-    // a wallet that never touches a private validator has lent 567 bytes, not spent them.
-    //
-    // `permission` is not seed-checked here: the permission program derives and validates the
-    // canonical PDA inside the CPI below, so a wrong *empty* account fails there. A *non-empty*
-    // junk account slips past this `data_is_empty` gate and skips creation, leaving the ledger
-    // unprotected — but only the owner signs their own deposit, so that is self-harm, not an
-    // attack on anyone else, and a real client always passes the canonical permission.
-    if ctx.accounts.permission.data_is_empty() {
-        store_ledger(&ledger_info, &ledger)?;
-        create_permission(&ctx, ledger.owner, ledger.bump)?;
+    // Created here on first use, unconditionally, rather than left to whoever later delegates.
+    if permission.data_is_empty() {
+        l.store(ledger_ai)?;
+        permission::create(
+            permission_program,
+            ledger_ai,
+            permission,
+            owner,
+            system_program,
+            vec![Member { flags: 0, pubkey: *owner.key }],
+            &[b"ledger", owner.key.as_ref(), &[bump]],
+        )?;
     }
 
-    // Before the claim, not after: a deposit of a new mint into a ledger with no free slot
-    // would otherwise fail on the very growth this call is about to perform.
-    ensure_headroom(
-        &ledger_info,
-        &mut ledger,
-        &ctx.accounts.owner,
-        &ctx.accounts.system_program,
-        min_free,
-        slot_increase,
-    )?;
-
-    let index = ledger.index_or_claim(&mint)?;
+    // Before the claim, not after: a deposit of a new mint into a full ledger would otherwise fail
+    // on the very growth this call is about to perform.
+    ensure_headroom(ledger_ai, &mut l, owner, system_program, min_free, slot_increase)?;
+    let index = l.index_or_claim(&mint)?;
 
     if mint == SOL_MINT {
-        // Rent must already be in place — see initialize_vault. Never funded from a
-        // deposit, or the last lamports credited could not be withdrawn.
-        require!(
-            ctx.accounts.vault.lamports() >= vault_floor()?,
-            VaultError::VaultNotInitialized
-        );
-
-        // Only the wallet itself can authorise a debit from its own lamports.
-        system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.owner.to_account_info(),
-                    to: ctx.accounts.vault.to_account_info(),
-                },
-            ),
-            amount,
+        // Rent must already be in place — see initialize_vault.
+        if vault.lamports() < vault_floor()? {
+            return Err(VaultError::VaultNotInitialized.into());
+        }
+        invoke(
+            &system_instruction::transfer(owner.key, vault.key, amount),
+            &[owner.clone(), vault.clone(), system_program.clone()],
         )?;
     } else {
-        require_reserve(&ctx.accounts.vault_token, &ctx.accounts.vault.key(), &mint)?;
-
-        let (src_mint, _, _) = token_fields(&ctx.accounts.owner_token)?;
-        require_keys_eq!(src_mint, mint, VaultError::MintMismatch);
-
-        token::transfer(
-            CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.owner_token.to_account_info(),
-                    to: ctx.accounts.vault_token.to_account_info(),
-                    authority: ctx.accounts.owner.to_account_info(),
-                },
-            ),
-            amount,
-        )?;
+        require_reserve(vault_token, vault.key, &mint)?;
+        let (src_mint, _, _) = token_fields(owner_token)?;
+        if src_mint != mint {
+            return Err(VaultError::MintMismatch.into());
+        }
+        spl::transfer(token_program, owner_token, vault_token, owner, amount, None)?;
     }
 
-    ledger.credit(index, amount)?;
-
-    store_ledger(&ledger_info, &ledger)
-}
-
-/// Creates the ledger's permission, naming its owner at flags 0.
-fn create_permission(ctx: &Context<Deposit>, owner: Pubkey, bump: u8) -> Result<()> {
-    // One member: the owner. Off-curve owners are refused above, so there is no PDA case.
-    let members = vec![Member { flags: 0, pubkey: owner }];
-
-    let ledger_info = ctx.accounts.ledger.to_account_info();
-    CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
-        .permissioned_account(&ledger_info)
-        .permission(&ctx.accounts.permission.to_account_info())
-        .payer(&ctx.accounts.owner.to_account_info())
-        .system_program(&ctx.accounts.system_program.to_account_info())
-        .args(MembersArgs { members: Some(members) })
-        .invoke_signed(&[&[b"ledger", owner.as_ref(), &[bump]]])
-        .map_err(|_| error!(VaultError::PermissionFailed))
+    l.credit(index, amount)?;
+    l.store(ledger_ai)
 }

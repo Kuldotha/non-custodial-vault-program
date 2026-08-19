@@ -1,44 +1,30 @@
-use anchor_lang::prelude::*;
-use anchor_lang::system_program;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program::invoke,
+    program_error::ProgramError, pubkey::Pubkey,
+};
+use solana_system_interface::instruction as system_instruction;
 
-use crate::state::*;
+use crate::utils::pda;
+use crate::utils::reserve::vault_floor;
 
-/// Funds the SOL reserve to its rent-exempt minimum. Run once, before anything else.
-///
-/// Paid separately rather than out of deposits, or the last lamports credited to a ledger
-/// could never be withdrawn — every SOL path spends `lamports - floor`.
-///
-/// Permissionless and idempotent: the vault is System-owned, so a plain transfer funds it
-/// whatever this instruction says.
-#[derive(Accounts)]
-pub struct InitializeVault<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
+/// Funds `["vault"]` to its rent floor. Permissionless and idempotent.
+/// Accounts: [payer, vault, system_program]
+pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
+    let [payer, vault, system_program, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    pda::validate(program_id, vault, &[b"vault"])?;
 
-    /// CHECK: the SOL reserve. A System-owned PDA holding every deposited lamport.
-    #[account(mut, seeds = [b"vault"], bump)]
-    pub vault: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
-}
-
-pub fn handler(ctx: Context<InitializeVault>) -> Result<()> {
     let floor = vault_floor()?;
-    let have = ctx.accounts.vault.lamports();
+    let have = vault.lamports();
     if have >= floor {
         return Ok(());
     }
-
-    system_program::transfer(
-        CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.payer.to_account_info(),
-                to: ctx.accounts.vault.to_account_info(),
-            },
-        ),
-        floor - have,
-    )?;
-
-    Ok(())
+    invoke(
+        &system_instruction::transfer(payer.key, vault.key, floor - have),
+        &[payer.clone(), vault.clone(), system_program.clone()],
+    )
 }

@@ -1,71 +1,73 @@
-use anchor_lang::prelude::*;
+use borsh::BorshDeserialize;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program_error::ProgramError,
+    pubkey::Pubkey,
+};
 
-use crate::state::*;
+use crate::error::VaultError;
+use crate::state::Ledger;
 
-/// Moves value between two ledgers, as pure bookkeeping — the reserves are never touched,
-/// which is why it works unchanged inside the rollup. `settle_receipt` is the other way
-/// ledgers move, and enforces the same one-human rule separately.
-#[derive(Accounts)]
-pub struct Settle<'info> {
-    #[account(
-        mut,
-        seeds = [b"ledger", src.owner.as_ref()],
-        bump = src.bump,
-    )]
-    pub src: Account<'info, Ledger>,
-
-    #[account(
-        mut,
-        seeds = [b"ledger", dst.owner.as_ref()],
-        bump = dst.bump,
-        // Aliasing src and dst would deserialize one account into two copies and write the
-        // credit back last, minting balance from nothing. Anchor does not dedupe for us.
-        constraint = dst.key() != src.key() @ VaultError::DuplicateLedger,
-    )]
-    pub dst: Account<'info, Ledger>,
-
-    /// CHECK: must equal `src.owner` and must sign — a wallet directly, a PDA by
-    /// `invoke_signed`. The destination needs no such account: a credit is not authorised
-    /// by anyone, and `dst.owner` is already bound to `dst` by the seeds above.
-    pub src_authority: UncheckedAccount<'info>,
-
-    /// CHECK: consents to opening a new slot on a human `dst` — its owner or session key.
-    pub dst_consenter: UncheckedAccount<'info>,
+#[derive(BorshDeserialize)]
+struct Args {
+    mint: Pubkey,
+    amount: u64,
 }
 
-pub fn handler(ctx: Context<Settle>, mint: Pubkey, amount: u64) -> Result<()> {
-    let src = &ctx.accounts.src;
-    let dst = &ctx.accounts.dst;
+/// Moves value between two ledgers — pure bookkeeping, the reserves are untouched.
+/// Accounts: [src, dst, src_authority, dst_consenter]
+pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let Args { mint, amount } =
+        Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [src, dst, src_authority, dst_consenter, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
 
-    require_keys_eq!(ctx.accounts.src_authority.key(), src.owner, VaultError::BadAuthority);
+    let mut src_l = Ledger::load_checked(src, program_id)?;
+    let mut dst_l = Ledger::load_checked(dst, program_id)?;
+    // Aliasing src and dst would write the credit back last, minting balance from nothing.
+    if src.key == dst.key {
+        return Err(VaultError::DuplicateLedger.into());
+    }
 
-    // At most one human, so Alice-pays-Bob is unrepresentable. Do NOT "simplify" to
-    // `src.pda_auth != dst.pda_auth`, which reads tidier and allows exactly that.
-    require!(src.pda_auth || dst.pda_auth, VaultError::NotProgramMediated);
+    if *src_authority.key != src_l.owner {
+        return Err(VaultError::BadAuthority.into());
+    }
 
-    // The debited side authorises: a human by signing, a program by `invoke_signed` over seeds
-    // it alone holds. A credit needs none, so a game can pay a player who has closed the app.
-    require!(
-        ctx.accounts.src_authority.is_signer,
-        if src.pda_auth { VaultError::MissingProgramSignature } else { VaultError::MissingUserSignature },
-    );
+    // At most one human, so Alice-pays-Bob is unrepresentable.
+    if !(src_l.pda_auth || dst_l.pda_auth) {
+        return Err(VaultError::NotProgramMediated.into());
+    }
 
-    let may_claim = if dst.pda_auth || dst.index_of(&mint).is_some() {
+    // The debited side authorises: a human by signing, a program by invoke_signed over its seeds.
+    if !src_authority.is_signer {
+        return Err(if src_l.pda_auth {
+            VaultError::MissingProgramSignature
+        } else {
+            VaultError::MissingUserSignature
+        }
+        .into());
+    }
+
+    let may_claim = if dst_l.pda_auth || dst_l.index_of(&mint).is_some() {
         true
     } else {
-        let consenter = &ctx.accounts.dst_consenter;
-        require!(consenter.is_signer, VaultError::MissingUserSignature);
-        let allowed = consenter.key() == dst.owner
-            || (dst.authorized != Pubkey::default() && dst.authorized == consenter.key());
-        require!(allowed, VaultError::NotAuthorizedToConsent);
+        if !dst_consenter.is_signer {
+            return Err(VaultError::MissingUserSignature.into());
+        }
+        let allowed = *dst_consenter.key == dst_l.owner
+            || (dst_l.authorized != Pubkey::default() && dst_l.authorized == *dst_consenter.key);
+        if !allowed {
+            return Err(VaultError::NotAuthorizedToConsent.into());
+        }
         true
     };
 
-    let src_index = ctx.accounts.src.index_of(&mint).ok_or(VaultError::NoBalance)?;
-    ctx.accounts.src.debit(src_index, amount)?;
+    let si = src_l.index_of(&mint).ok_or(VaultError::NoBalance)?;
+    src_l.debit(si, amount)?;
+    let di = dst_l.index_for_credit(&mint, may_claim)?;
+    dst_l.credit(di, amount)?;
 
-    let dst_index = ctx.accounts.dst.index_for_credit(&mint, may_claim)?;
-    ctx.accounts.dst.credit(dst_index, amount)?;
-
+    src_l.store(src)?;
+    dst_l.store(dst)?;
     Ok(())
 }

@@ -1,60 +1,58 @@
-use anchor_lang::prelude::*;
-use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
-use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use borsh::BorshDeserialize;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program_error::ProgramError,
+    pubkey::Pubkey,
+};
+
+use ephemeral_rollups_sdk::access_control::structs::Member;
 use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
-use crate::state::*;
+use crate::constants::MAX_SLOTS;
+use crate::error::VaultError;
+use crate::utils::account::create_ledger_account_sized;
+use crate::utils::pda::{self, is_pda};
+use crate::utils::permission;
 
-/// Opens an empty ledger for a wallet at a chosen size. A zero-amount `deposit` does the same
-/// at the default size, and is how most ledgers come to exist; this is for sizing one up front.
-#[derive(Accounts)]
-#[instruction(slots: u16)]
-pub struct OpenWalletLedger<'info> {
-    /// Pays its own rent, which is what makes it the rent payer on record.
-    #[account(mut)]
-    pub owner: Signer<'info>,
-
-    /// CHECK: created here and validated by hand — see `create_ledger_account`.
-    #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
-    pub ledger: UncheckedAccount<'info>,
-
-    /// CHECK: the ledger's permission, created here alongside it.
-    #[account(mut)]
-    pub permission: UncheckedAccount<'info>,
-
-    /// CHECK: the MagicBlock permission program, pinned to its known address.
-    #[account(address = PERMISSION_PROGRAM_ID)]
-    pub permission_program: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
+#[derive(BorshDeserialize)]
+struct Args {
+    slots: u16,
 }
 
-pub fn handler(ctx: Context<OpenWalletLedger>, slots: u16) -> Result<()> {
-    require!(!is_pda(&ctx.accounts.owner.key()), VaultError::OwnerNotWallet);
-    let ledger_info = ctx.accounts.ledger.to_account_info();
-    require!(ledger_info.data_is_empty(), VaultError::LedgerExists);
-    require!(slots > 0 && slots <= MAX_SLOTS, VaultError::BadSlotCount);
+/// Opens an empty wallet ledger at a chosen size, owner-funded.
+/// Accounts: [owner, ledger, permission, permission_program, system_program]
+pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let Args { slots } =
+        Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [owner, ledger_ai, permission, permission_program, system_program, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if is_pda(owner.key) {
+        return Err(VaultError::OwnerNotWallet.into());
+    }
+    if *permission_program.key != PERMISSION_PROGRAM_ID {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    let bump = pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
+    if !ledger_ai.data_is_empty() {
+        return Err(VaultError::LedgerExists.into());
+    }
+    if slots == 0 || slots > MAX_SLOTS {
+        return Err(VaultError::BadSlotCount.into());
+    }
 
-    let ledger = create_ledger_account_sized(
-        &ledger_info,
-        &ctx.accounts.owner,
-        &ctx.accounts.owner,
-        &ctx.accounts.system_program,
-        ctx.bumps.ledger,
-        slots as usize,
-    )?;
-    store_ledger(&ledger_info, &ledger)?;
+    let l = create_ledger_account_sized(ledger_ai, owner, owner, system_program, bump, slots as usize)?;
+    l.store(ledger_ai)?;
 
-    // One member: the owner — what lets a player read their own balance in a private rollup,
-    // and nobody else.
-    CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
-        .permissioned_account(&ledger_info)
-        .permission(&ctx.accounts.permission.to_account_info())
-        .payer(&ctx.accounts.owner.to_account_info())
-        .system_program(&ctx.accounts.system_program.to_account_info())
-        .args(MembersArgs {
-            members: Some(vec![Member { flags: 0, pubkey: ctx.accounts.owner.key() }]),
-        })
-        .invoke_signed(&[&[b"ledger", ctx.accounts.owner.key().as_ref(), &[ctx.bumps.ledger]]])
-        .map_err(|_| error!(VaultError::PermissionFailed))
+    permission::create(
+        permission_program,
+        ledger_ai,
+        permission,
+        owner,
+        system_program,
+        vec![Member { flags: 0, pubkey: *owner.key }],
+        &[b"ledger", owner.key.as_ref(), &[bump]],
+    )
 }
