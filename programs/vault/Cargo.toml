@@ -23,3 +23,8 @@ anchor-spl = "0.31.1"
 # for target_os="solana", this one goes through the sol_curve_validate_point syscall
 solana-curve25519 = "2"
 ephemeral-rollups-sdk = { version = "0.14.4", features = ["anchor-compat", "access-control"] }
+
+[dev-dependencies]
+solana-program-test = "2.3"
+solana-sdk = "2.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

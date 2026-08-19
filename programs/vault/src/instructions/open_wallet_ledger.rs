@@ -1,22 +1,12 @@
 use anchor_lang::prelude::*;
 use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
 use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
 use crate::state::*;
 
-/// Opens an empty ledger for a wallet, funding nothing.
-///
-/// `deposit` opens a wallet's ledger as a side effect of putting value in, which is how one
-/// normally comes to exist — this is for opening one deliberately, sized up front. `amount`
-/// zero on a deposit does the same at the default size.
-///
-/// Wallets only, asserted rather than assumed: its PDA counterpart differs in who pays, who
-/// the permission names, and what has to be proven — too much to share an instruction with.
-/// The owner pays its own rent, because rent returns on close and paying somebody else's
-/// would be a way to hand them money.
-///
-/// `slots` sizes it up front, capped at [`MAX_SLOTS`]: rent scales with the count and is paid
-/// on the spot, so a zero too many is an expensive mistake.
+/// Opens an empty ledger for a wallet at a chosen size. A zero-amount `deposit` does the same
+/// at the default size, and is how most ledgers come to exist; this is for sizing one up front.
 #[derive(Accounts)]
 #[instruction(slots: u16)]
 pub struct OpenWalletLedger<'info> {
@@ -32,7 +22,8 @@ pub struct OpenWalletLedger<'info> {
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -54,8 +45,8 @@ pub fn handler(ctx: Context<OpenWalletLedger>, slots: u16) -> Result<()> {
     )?;
     store_ledger(&ledger_info, &ledger)?;
 
-    // One member: the owner. That is what lets a player read their own balance inside a
-    // private rollup, and nobody else read it.
+    // One member: the owner — what lets a player read their own balance in a private rollup,
+    // and nobody else.
     CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
         .permissioned_account(&ledger_info)
         .permission(&ctx.accounts.permission.to_account_info())

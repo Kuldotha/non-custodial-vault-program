@@ -1,23 +1,20 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, Transfer};
 use ephemeral_rollups_sdk::access_control::instructions::ClosePermissionCpiBuilder;
+use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
 use crate::state::*;
 
-/// Sweeps every balance back to the owner and closes both the ledger and its permission
-/// account.
+/// Sweeps every balance back to the owner, then closes the ledger and its permission. basenet
+/// only — Anchor's ownership check rejects a delegated ledger.
 ///
-/// The **rent** goes to whoever put it up, not to the owner — see `Ledger::rent_payer`. For a
-/// wallet those are the same account; for a sponsored PDA they are not, and routing it any other
-/// way would turn sponsoring a ledger into a way of handing its owner money.
+/// The **rent** goes to whoever put it up, not to the owner. For a wallet they are the same
+/// account; for a sponsored PDA they are not, and routing it any other way would make
+/// sponsoring a ledger a way of handing its owner money.
 ///
-/// Every non-zero token entry must be paid out in the same transaction, so its
-/// `(vault_token, owner_token)` pair is passed in `remaining_accounts` **in entry order**.
-/// The instruction refuses to close while any balance is unaccounted for, so a partial
-/// account list can never strand value in the vault.
-///
-/// basenet only: a delegated ledger is owned by the delegation program, so Anchor's ownership
-/// check rejects it before anything here runs.
+/// Every non-zero token entry must be paid out in the same transaction: pass its
+/// `(vault_token, owner_token)` pair in `remaining_accounts`, **in entry order**. Closing is
+/// refused while any balance is unaccounted for, so a partial list cannot strand value.
 #[derive(Accounts)]
 pub struct CloseLedger<'info> {
     /// CHECK: the ledger owner — wallet, or a program's PDA signing via invoke_signed.
@@ -47,7 +44,8 @@ pub struct CloseLedger<'info> {
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
@@ -136,17 +134,15 @@ pub fn handler<'info>(
         VaultError::MissingTokenAccounts
     );
 
-    // ── close the permission, then the ledger (Anchor's `close = owner`) ──────
+    // ── close the permission, then the ledger (Anchor's `close = rent_payer`) ─
     // bound to locals: the CPI builder borrows these for its whole lifetime
     let ledger_info = ctx.accounts.ledger.to_account_info();
     let perm_program = ctx.accounts.permission_program.to_account_info();
     let perm_info = ctx.accounts.permission.to_account_info();
-    // The permission's rent goes home the same way the ledger's does.
     let payer_info = ctx.accounts.rent_payer.to_account_info();
 
-    // Ledgers opened before permissions were created alongside them have none. The permission
-    // program panics on an empty account, so a ledger that never had one could never be closed
-    // — the rent was locked up by its own absence.
+    // Ledgers predating permissions have none, and the permission program panics on an empty
+    // account — without this guard their rent would be locked up by its own absence.
     if !perm_info.data_is_empty() {
         ClosePermissionCpiBuilder::new(&perm_program)
             .payer(&payer_info)

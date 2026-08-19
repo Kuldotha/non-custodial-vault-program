@@ -12,40 +12,13 @@ pub const SOL_MINT: Pubkey = Pubkey::new_from_array([0u8; 32]);
 pub const DEFAULT_SLOTS: u16 = 32;
 pub const DEFAULT_MIN_FREE: u16 = 16;
 /// Solana caps a single realloc at 10 KiB, which is 256 entries.
-pub const MAX_GROW_STEP: u16 = 256;
+pub const MAX_SLOT_INCREASE: u16 = 256;
 /// Largest capacity a ledger may be opened with. Rent scales with it and is paid up front, so an
 /// accidental zero too many is an expensive mistake — 256 slots is already far past any realistic
 /// mint set, and a ledger that genuinely needs more can be grown a step at a time.
 pub const MAX_SLOTS: u16 = 256;
 
 pub const ENTRY_SIZE: usize = 32 + 8;
-
-/// Ledger layout version, kept in `_pad[0]`. Version 1 appends a 64-byte authorization
-/// trailer at the very end of the account — past the borsh region, so the `Ledger` struct,
-/// every existing decoder, and Anchor's exit serialization never see it. The trailer is
-/// `authorized (32) | authority (32)`: a session key that may consent to debits of this
-/// ledger, and the one program authority whose receipts it may consent to.
-pub const LEDGER_V_AUTHORIZED: u8 = 1;
-pub const AUTH_TRAILER: usize = 64;
-/// `_pad` starts here: 8 discriminator + 32 owner + 1 pda_auth + 1 bump.
-const VERSION_OFFSET: usize = 42;
-
-/// The ledger's session-key authorization, or None — for a v0 ledger, or a cleared one.
-/// An all-zero key is the explicit "not set": it can never be confused with a grant,
-/// because assign refuses to write it as anything but a revocation.
-pub fn read_authorization(info: &AccountInfo) -> Result<Option<(Pubkey, Pubkey)>> {
-    let data = info.try_borrow_data()?;
-    if data.len() < Ledger::HEADER + AUTH_TRAILER || data[VERSION_OFFSET] != LEDGER_V_AUTHORIZED {
-        return Ok(None);
-    }
-    let o = data.len() - AUTH_TRAILER;
-    let key = Pubkey::new_from_array(data[o..o + 32].try_into().unwrap());
-    if key == Pubkey::default() {
-        return Ok(None);
-    }
-    let authority = Pubkey::new_from_array(data[o + 32..o + 64].try_into().unwrap());
-    Ok(Some((key, authority)))
-}
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, PartialEq)]
 pub struct Entry {
@@ -66,14 +39,19 @@ pub struct Ledger {
     /// Where the rent goes when this account is closed, and the only key that may grow it.
     /// Always the owner — the lamports may come from any signer, but they come back here.
     pub rent_payer: Pubkey,
+    /// For a wallet: a session key that may consent to debits in the owner's place and end its
+    /// rollup session, or zero. Unscoped, so it spends the whole balance, but it cannot reach the
+    /// wallet — `withdraw` derives its ledger from the signer. For a PDA ledger: the member
+    /// program it belongs to, which settle checks each receipt against.
+    pub authorized: Pubkey,
     /// Pre-allocated slots. `entries.len()` is the capacity; a delegated ledger
     /// cannot realloc, so the space has to be there before the session starts.
     pub entries: Vec<Entry>,
 }
 
 impl Ledger {
-    /// 8 discriminator + owner + pda_auth + bump + pad + vec len prefix.
-    pub const HEADER: usize = 8 + 32 + 1 + 1 + 6 + 32 + 4;
+    /// 8 discriminator + owner + pda_auth + bump + pad + rent_payer + authorized + vec len.
+    pub const HEADER: usize = 8 + 32 + 1 + 1 + 6 + 32 + 32 + 4;
 
     pub fn space(slots: usize) -> usize {
         Self::HEADER + slots * ENTRY_SIZE
@@ -98,8 +76,16 @@ impl Ledger {
         self.bump = bump;
         self._pad = [0u8; 6];
         self.rent_payer = rent_payer;
+        self.authorized = Pubkey::default();
         self.entries = vec![Entry::default(); slots];
         self.entries[0].mint = SOL_MINT;
+    }
+
+    /// Whether `who` may end this ledger's rollup session. A PDA's owner signs by CPI, so a
+    /// program ledger is reached the same way it was delegated.
+    pub fn may_end_session(&self, who: &Pubkey) -> bool {
+        *who == self.owner
+            || (!self.pda_auth && self.authorized != Pubkey::default() && *who == self.authorized)
     }
 
     /// Index of the entry for `mint`, or None. SOL is positional — never a scan.
@@ -124,6 +110,32 @@ impl Ledger {
         self.entries[free].mint = *mint;
         Ok(free)
     }
+
+    pub fn index_for_credit(&mut self, mint: &Pubkey, may_claim: bool) -> Result<usize> {
+        if let Some(i) = self.index_of(mint) {
+            return Ok(i);
+        }
+        require!(may_claim, VaultError::SlotClaimNeedsConsent);
+        self.index_or_claim(mint)
+    }
+
+    /// Debits an entry, releasing its slot at zero. The release is what keeps a slot from
+    /// being spent for the life of the ledger: a credit needs no consent, so without it
+    /// anyone could fill a ledger with dust of mints its owner never asked for.
+    pub fn debit(&mut self, index: usize, amount: u64) -> Result<()> {
+        let entry = &mut self.entries[index];
+        entry.amount = entry.amount.checked_sub(amount).ok_or(VaultError::Insufficient)?;
+        if entry.amount == 0 && index != 0 {
+            entry.mint = SOL_MINT;
+        }
+        Ok(())
+    }
+
+    pub fn credit(&mut self, index: usize, amount: u64) -> Result<()> {
+        let entry = &mut self.entries[index];
+        entry.amount = entry.amount.checked_add(amount).ok_or(VaultError::Overflow)?;
+        Ok(())
+    }
 }
 
 #[error_code]
@@ -136,9 +148,9 @@ pub enum VaultError {
     Insufficient,
     #[msg("Arithmetic overflow")]
     Overflow,
-    #[msg("settle requires exactly one program side and one human side")]
+    #[msg("At least one side of a movement must be a program ledger")]
     NotProgramMediated,
-    #[msg("The program side of a settle must sign")]
+    #[msg("The program side must sign, by invoke_signed over its own seeds")]
     MissingProgramSignature,
     #[msg("A human must sign to be debited")]
     MissingUserSignature,
@@ -146,27 +158,23 @@ pub enum VaultError {
     InsufficientReserve,
     #[msg("Token account does not match the mint argument")]
     MintMismatch,
-    #[msg("This ledger already has enough free slots")]
-    GrowNotNeeded,
     #[msg("Slot count must be between 1 and 256")]
     BadSlotCount,
     #[msg("Creating the ledger's permission account failed")]
     PermissionFailed,
-    #[msg("This ledger has no permission account — create one before delegating")]
-    MissingPermission,
+    #[msg("This ledger already has a permission account")]
+    PermissionExists,
     #[msg("A token account pair is missing for a non-zero balance")]
     MissingTokenAccounts,
     #[msg("The reserve must be the vault's associated token account for this mint")]
     NotCanonicalReserve,
     #[msg("The vault is not funded to its rent floor — call initialize_vault first")]
     VaultNotInitialized,
-    #[msg("Only the program's upgrade authority may initialize the vault")]
-    NotUpgradeAuthority,
     #[msg("Ledger account is not owned by this program")]
     BadLedgerOwner,
-    #[msg("The invoked program returned no usable authorization")]
+    #[msg("Malformed receipt — bad counts, sizes, or account list")]
     NoAuthorization,
-    #[msg("The returned seeds do not derive the program ledger's owner")]
+    #[msg("The authority account does not match the one on record")]
     BadAuthority,
     #[msg("deposit and withdraw are wallet-only; program ledgers move value through settle")]
     OffCurveOwnerNotAllowed,
@@ -176,8 +184,8 @@ pub enum VaultError {
     NotRentPayer,
     #[msg("That ledger already exists")]
     LedgerExists,
-    #[msg("This receipt has already been settled")]
-    AlreadySettled,
+    #[msg("The account passed in the receipt slot is not a receipt")]
+    NotAReceipt,
     #[msg("This instruction is for wallet ledgers — the owner must be on-curve")]
     OwnerNotWallet,
     #[msg("This instruction is for program ledgers — the owner must be a PDA")]
@@ -186,20 +194,31 @@ pub enum VaultError {
     MemberProgramMismatch,
     #[msg("A program ledger cannot carry a session key — only wallets delegate consent")]
     CannotAuthorizePdaLedger,
-    #[msg("The authorized key must be on-curve, and the authority must be set")]
+    #[msg("The authorized session key must be on-curve")]
     BadAuthorizedKey,
-    #[msg("The signer is neither the debited ledger's owner nor its session key for this authority")]
+    #[msg("The signer is neither the debited ledger's owner nor its session key")]
     NotAuthorizedToConsent,
+    #[msg("A receipt created in this slot is still live — it may not be overwritten")]
+    ReceiptLive,
+    #[msg("A receipt must be settled in the slot it was created in")]
+    ReceiptExpired,
+    #[msg("The last receipt at this address was never closed by the member program")]
+    ReceiptNotConsumed,
+    #[msg("The callback program is not the member program proven into this receipt")]
+    CallbackProgramMismatch,
+    #[msg("A receipt names the same ledger more than once")]
+    DuplicateLedger,
+    #[msg("Opening a new slot on a human ledger needs the owner's or session key's consent")]
+    SlotClaimNeedsConsent,
 }
 
-/// The reserve for a mint is the vault PDA's **associated** token account. This program never
-/// creates it — the developer does, with the ATA program's `create_idempotent`, in the same
-/// transaction. Authority does not come from the derivation anyway: it comes from the
-/// `owner` field inside the token account, which the vault signs against with its seeds.
+/// The reserve for a mint is the vault PDA's **associated** token account, created by the
+/// developer with `create_idempotent` in the same transaction — never here.
 ///
-/// The derivation is still asserted, so the reserve for a mint is exactly one pool. Accepting
-/// any vault-owned account for the mint would let deposits and withdrawals hit different
-/// pools — no theft, since the ledgers are the only accounting, but funds could strand.
+/// Asserting the derivation is not what gives authority; the token account's own `owner` field
+/// does. It is asserted so a mint has exactly one pool: any vault-owned account would let
+/// deposits and withdrawals hit different ones and strand funds, though never lose them, since
+/// the ledgers are the only accounting.
 pub fn require_reserve(info: &AccountInfo, vault: &Pubkey, mint: &Pubkey) -> Result<u64> {
     require_keys_eq!(
         info.key(),
@@ -228,11 +247,9 @@ pub fn vault_floor() -> Result<u64> {
     Ok(Rent::get()?.minimum_balance(0))
 }
 
-/// Reads (mint, owner, amount) out of a raw SPL token account.
-///
-/// Done by hand rather than with `Account<TokenAccount>` because these slots carry a
-/// placeholder on the SOL path and so cannot be typed in the accounts struct — and
-/// because these three fields are exactly what the safety checklist requires.
+/// Reads (mint, owner, amount) out of a raw SPL token account. By hand rather than
+/// `Account<TokenAccount>` because these slots carry a placeholder on the SOL path and so
+/// cannot be typed in the accounts struct.
 pub fn token_fields(info: &AccountInfo) -> Result<(Pubkey, Pubkey, u64)> {
     require_keys_eq!(*info.owner, anchor_spl::token::ID, VaultError::MintMismatch);
     let data = info.try_borrow_data()?;
@@ -243,19 +260,21 @@ pub fn token_fields(info: &AccountInfo) -> Result<(Pubkey, Pubkey, u64)> {
     Ok((mint, owner, amount))
 }
 
-/// Grows a ledger to keep free slots at or above `min_free`, funding the extra rent from
-/// `payer`. basenet only — a delegated account cannot be reallocated, which is the whole
-/// reason slots are pre-allocated in the first place.
+/// Adds `slot_increase` slots when fewer than `min_free` are free, funding the rent from `payer`.
+/// basenet only: a delegated account cannot be reallocated, which is why slots are
+/// pre-allocated at all.
 ///
-/// Operates on the raw `AccountInfo` and an in-memory `Ledger`, because the caller owns
-/// both: `Account<Ledger>` cannot be used for a growing account (see `deposit`).
+/// Takes a raw `AccountInfo` and an in-memory `Ledger` because `Account<Ledger>` cannot grow
+/// one: Anchor serialises its own copy on exit, after the handler, so the longer `entries`
+/// would be overwritten by the original — leaving the account paying rent for bytes that
+/// `capacity()` never reports.
 pub fn ensure_headroom<'info>(
     info: &AccountInfo<'info>,
     ledger: &mut Ledger,
     payer: &Signer<'info>,
     system_program: &Program<'info, System>,
     min_free: u16,
-    step: u16,
+    slot_increase: u16,
 ) -> Result<()> {
     // Growth is funded by whoever funded the account, and by nobody else. Any other payer
     // would reopen the channel a slot at a time, since the extra rent leaves with the refund.
@@ -264,23 +283,12 @@ pub fn ensure_headroom<'info>(
     if ledger.free_slots() >= min_free as usize {
         return Ok(());
     }
-    require!(step > 0 && step <= MAX_GROW_STEP, VaultError::BadSlotCount);
+    require!(slot_increase > 0 && slot_increase <= MAX_SLOT_INCREASE, VaultError::BadSlotCount);
 
-    // The trailer lives at the end of the account, which is exactly where growth happens —
-    // save it before the resize and put it back at the new end, or the new entries would
-    // land on top of it and the authorization would decay into garbage.
-    let trailer: Option<[u8; AUTH_TRAILER]> = if ledger._pad[0] == LEDGER_V_AUTHORIZED {
-        let d = info.try_borrow_data()?;
-        Some(d[d.len() - AUTH_TRAILER..].try_into().unwrap())
-    } else {
-        None
-    };
-
-    for _ in 0..step {
+    for _ in 0..slot_increase {
         ledger.entries.push(Entry::default());
     }
-    let new_space =
-        Ledger::space(ledger.capacity()) + if trailer.is_some() { AUTH_TRAILER } else { 0 };
+    let new_space = Ledger::space(ledger.capacity());
 
     let needed = Rent::get()?.minimum_balance(new_space);
     let have = info.lamports();
@@ -297,11 +305,6 @@ pub fn ensure_headroom<'info>(
         )?;
     }
     info.resize(new_space)?;
-    if let Some(t) = trailer {
-        let mut d = info.try_borrow_mut_data()?;
-        let o = d.len() - AUTH_TRAILER;
-        d[o..].copy_from_slice(&t);
-    }
     Ok(())
 }
 
@@ -333,12 +336,10 @@ pub fn create_ledger_account_sized<'info>(
     bump: u8,
     slots: usize,
 ) -> Result<Ledger> {
-    // A wallet funds its own ledger; nobody else may, because the rent comes back to the owner
-    // on close and paying somebody's rent would then be a way to hand them money.
-    //
-    // A PDA cannot pay, so whoever does becomes the rent payer — the lamports return to them,
-    // and they are the only account that may grow or close it. Sponsoring is then free of the
-    // problem above: the money goes back where it came from.
+    // A wallet funds its own ledger and nobody else may: rent returns to the payer on close, so
+    // paying somebody else's would be a way to hand them money. A PDA cannot pay, so whoever
+    // does becomes the rent payer — the lamports go back where they came from, and that account
+    // is then the only one that may grow or close it.
     let rent_payer = if is_pda(&owner.key()) {
         payer.key()
     } else {
@@ -347,17 +348,41 @@ pub fn create_ledger_account_sized<'info>(
     };
 
     let space = Ledger::space(slots);
-    anchor_lang::system_program::create_account(
+    let rent = Rent::get()?.minimum_balance(space);
+    let owner_key = owner.key();
+    let bump_arr = [bump];
+    let signer_seeds: &[&[&[u8]]] = &[&[b"ledger", owner_key.as_ref(), &bump_arr]];
+
+    // Not `create_account`: it aborts if the PDA already holds lamports, so anyone could block a
+    // ledger's creation by sending a single lamport to its address first. transfer-then-allocate
+    // -then-assign reaches the same end state but tolerates a pre-funded account.
+    let have = info.lamports();
+    if have < rent {
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: payer.to_account_info(),
+                    to: info.clone(),
+                },
+            ),
+            rent - have,
+        )?;
+    }
+    anchor_lang::system_program::allocate(
         CpiContext::new_with_signer(
             system_program.to_account_info(),
-            anchor_lang::system_program::CreateAccount {
-                from: payer.to_account_info(),
-                to: info.clone(),
-            },
-            &[&[b"ledger", owner.key().as_ref(), &[bump]]],
+            anchor_lang::system_program::Allocate { account_to_allocate: info.clone() },
+            signer_seeds,
         ),
-        Rent::get()?.minimum_balance(space),
         space as u64,
+    )?;
+    anchor_lang::system_program::assign(
+        CpiContext::new_with_signer(
+            system_program.to_account_info(),
+            anchor_lang::system_program::Assign { account_to_assign: info.clone() },
+            signer_seeds,
+        ),
         &crate::ID,
     )?;
 

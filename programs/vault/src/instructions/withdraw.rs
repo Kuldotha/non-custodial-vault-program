@@ -3,12 +3,12 @@ use anchor_spl::token::{self, Token, Transfer};
 
 use crate::state::*;
 
-/// The destination is derived from the signer and never passed, which is what makes
-/// withdrawal same-owner-only.
+/// Vault → wallet, and only ever the signer's own. SOL goes straight to the signer; a token
+/// account is passed but must be owned by them, so no other beneficiary is expressible.
 #[derive(Accounts)]
 #[instruction(mint: Pubkey)]
 pub struct Withdraw<'info> {
-    /// CHECK: the ledger owner — a wallet, or a program's PDA signing via invoke_signed.
+    /// CHECK: the wallet withdrawing. Off-curve owners are refused in the handler.
     #[account(mut)]
     pub owner: Signer<'info>,
 
@@ -35,15 +35,9 @@ pub struct Withdraw<'info> {
 }
 
 pub fn handler(ctx: Context<Withdraw>, mint: Pubkey, amount: u64) -> Result<()> {
-    // Off-curve owners are refused outright. A program's ledger is filled and emptied by
-    // `settle` against a human who already holds a balance, and that is the only way in or out.
-    //
-    // Two reasons this is a hard rule rather than a convention. It keeps the wallet paying in
-    // and the wallet taking delivery the same person — anything else needs a stand-in wallet on
-    // both sides, and a stand-in that can differ is a transfer between people wearing a
-    // program as a disguise. And it does not depend on the System program refusing to debit a
-    // PDA: SPL transfers only need the authority to sign, so without this check a PDA could
-    // move *tokens* in and out directly while SOL stayed impossible.
+    // Off-curve owners are refused outright: a program's ledger moves value only through
+    // `settle`. Not a convention — an SPL transfer needs only the authority's signature, so
+    // without this a PDA could pull tokens straight out while SOL stayed impossible.
     require!(
         !is_pda(&ctx.accounts.owner.key()),
         VaultError::OffCurveOwnerNotAllowed
@@ -52,13 +46,7 @@ pub fn handler(ctx: Context<Withdraw>, mint: Pubkey, amount: u64) -> Result<()> 
     let ledger = &mut ctx.accounts.ledger;
     let index = ledger.index_of(&mint).ok_or(VaultError::NoBalance)?;
 
-    {
-        let entry = &mut ledger.entries[index];
-        entry.amount = entry
-            .amount
-            .checked_sub(amount)
-            .ok_or(VaultError::Insufficient)?;
-    }
+    ledger.debit(index, amount)?;
 
     if mint == SOL_MINT {
         // The vault's own rent is not part of anyone's balance (spec §2.4).

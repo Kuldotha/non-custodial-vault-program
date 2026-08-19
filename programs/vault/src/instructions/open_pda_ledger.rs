@@ -1,26 +1,17 @@
 use anchor_lang::prelude::*;
 use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
 use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
 use crate::state::*;
 
-/// Opens an empty ledger for a program's PDA, sponsored by whoever pays.
-///
-/// A PDA can neither pay rent nor sign a System transfer, and `deposit` refuses off-curve
-/// owners — its ledger is filled by `settle` from a human who already holds a balance, so the
-/// ledger has to be creatable on its own. The sponsorship moves nothing: the ledger records
-/// who paid, the rent returns to them on close, and only they may grow it.
-///
-/// **The member program is proven, not trusted.** A PDA's address bakes in the program id, so
-/// only [`member_program`] can ever have produced the owner's signature — the derivation check
-/// plus that signature make a wrong program in the permission unconstructible. Reading the
-/// program off the owner account's `owner` field, which this replaces, was correct only by
-/// timing: delegation and reassignment change that field, and the house ledger once ended up
-/// naming the delegation program instead of its game.
+/// Opens an empty ledger for a program's PDA, sponsored by whoever pays. A PDA can neither pay
+/// rent nor sign a System transfer, and `deposit` refuses off-curve owners, so its ledger has
+/// to be creatable on its own.
 ///
 /// Members: `[member_program, payer]` — the program because the rollup's filter checks an
-/// instruction's top-level program, the sponsor because it is the one member able to sign an
-/// RPC challenge. The PDA itself can do neither; naming it would be decoration.
+/// instruction's top-level program, the sponsor because it is the only member able to sign an
+/// RPC challenge. The PDA can do neither; naming it would be decoration.
 #[derive(Accounts)]
 #[instruction(slots: u16, member_program: Pubkey, owner_seeds: Vec<Vec<u8>>)]
 pub struct OpenPdaLedger<'info> {
@@ -40,7 +31,8 @@ pub struct OpenPdaLedger<'info> {
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -58,7 +50,7 @@ pub fn handler(
     require!(ledger_info.data_is_empty(), VaultError::LedgerExists);
     require!(slots > 0 && slots <= MAX_SLOTS, VaultError::BadSlotCount);
 
-    let ledger = create_ledger_account_sized(
+    let mut ledger = create_ledger_account_sized(
         &ledger_info,
         &ctx.accounts.payer,
         &ctx.accounts.owner,
@@ -66,6 +58,7 @@ pub fn handler(
         ctx.bumps.ledger,
         slots as usize,
     )?;
+    ledger.authorized = member_program;
     store_ledger(&ledger_info, &ledger)?;
 
     CreatePermissionCpiBuilder::new(&ctx.accounts.permission_program.to_account_info())
@@ -83,9 +76,12 @@ pub fn handler(
         .map_err(|_| error!(VaultError::PermissionFailed))
 }
 
-/// The proof that [`member_program`] is the program behind [`owner`]: its seeds must derive
-/// the owner's address under that program, and address spaces cannot collide across programs —
-/// so the owner's signature, which the instruction requires, can only have come from it.
+/// The proof that `member_program` is the program behind `owner`: its seeds must derive the
+/// owner's address under that program, and address spaces cannot collide across programs — so
+/// the owner's signature, which callers require, can only have come from it.
+///
+/// Do not replace this by reading the owner account's `owner` field: delegation and
+/// reassignment rewrite it.
 pub fn verify_pda_owner(
     owner: &impl Key,
     member_program: &Pubkey,

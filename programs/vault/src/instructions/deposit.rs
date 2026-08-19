@@ -1,43 +1,28 @@
 use anchor_lang::prelude::*;
 use ephemeral_rollups_sdk::access_control::instructions::CreatePermissionCpiBuilder;
 use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 use anchor_lang::system_program;
 use anchor_spl::token::{self, Token, Transfer};
 
 use crate::state::*;
 
-/// Wallet → vault, and the only way a ledger ever comes into existence.
+/// Wallet → vault. One instruction for both assets: `mint` selects, and on the SOL path the
+/// token slots are placeholders that are never read, so the account layout stays fixed.
 ///
-/// One instruction for both assets: `mint` selects. When it is `SOL_MINT` the token
-/// slots are placeholders and are never read, so the account layout stays fixed.
-///
-/// Three things happen here besides the transfer, all idempotent, and all deliberately
-/// *not* separate instructions:
-///
-/// - **the ledger** is created if absent. There is no public `create_ledger`, so a ledger
-///   cannot exist in a state this instruction did not produce;
-/// - **the permission is created if absent**, which makes "no ledger is ever readable in a
-///   rollup" structural rather than a check `delegate` has to remember to make;
-/// - **headroom** is topped up, because a delegated ledger cannot be reallocated and
-///   `settle` inside the rollup can only claim slots that already exist.
-///
-/// A program that is only ever *credited* through `settle` still needs a ledger. It opens
-/// one by depositing — `amount` may be zero — signing for its own PDA with `invoke_signed`.
-/// That is also how it replenishes headroom between sessions. A program's ledger holds
-/// every mint it ever pays out, so it reaches its working size through repeated zero
-/// deposits with a high `min_free`; each one grows by at most `slot_increase`.
+/// Three things happen besides the transfer, all idempotent and none of them worth a separate
+/// instruction: the ledger is created if absent, its permission is created if absent, and
+/// headroom is topped up — a delegated ledger cannot be reallocated, and `settle` inside the
+/// rollup can only use slots that already exist.
 #[derive(Accounts)]
 #[instruction(mint: Pubkey, amount: u64, min_free: Option<u16>, slot_increase: Option<u16>)]
 pub struct Deposit<'info> {
-    /// CHECK: the ledger owner — a wallet, or a program's PDA signing via invoke_signed.
-    /// Signing is what proves a program controls the vault-authority it is opening.
+    /// CHECK: the wallet depositing. Off-curve owners are refused in the handler.
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    /// CHECK: created here on first use and validated by hand. Deliberately *not*
-    /// `init_if_needed`: that constraint re-checks its `space` expression against the
-    /// account's real length on every call, so the first growth would break every
-    /// subsequent deposit. See `create_ledger_account`.
+    /// CHECK: validated by hand, and deliberately *not* `init_if_needed` — see
+    /// `create_ledger_account` for why.
     #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
     pub ledger: UncheckedAccount<'info>,
 
@@ -45,7 +30,8 @@ pub struct Deposit<'info> {
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
 
     /// CHECK: the SOL reserve. A System-owned PDA; holds every deposited lamport.
@@ -71,21 +57,17 @@ pub fn handler(
     min_free: Option<u16>,
     slot_increase: Option<u16>,
 ) -> Result<()> {
-    // Off-curve owners are refused outright. A program's ledger is filled and emptied by
-    // `settle` against a human who already holds a balance, and that is the only way in or out.
-    //
-    // Two reasons this is a hard rule rather than a convention. It keeps the wallet paying in
-    // and the wallet taking delivery the same person — anything else needs a stand-in wallet on
-    // both sides, and a stand-in that can differ is a transfer between people wearing a
-    // program as a disguise. And it does not depend on the System program refusing to debit a
-    // PDA: SPL transfers only need the authority to sign, so without this check a PDA could
-    // move *tokens* in and out directly while SOL stayed impossible.
+    // Off-curve owners are refused outright — a program's ledger moves value only through
+    // `settle`. That keeps the wallet paying in and the wallet taking delivery the same person,
+    // and it does not lean on the System program refusing to debit a PDA: an SPL transfer needs
+    // only the authority's signature, so without this a PDA could move tokens in and out while
+    // SOL stayed impossible.
     require!(
         !is_pda(&ctx.accounts.owner.key()),
         VaultError::OffCurveOwnerNotAllowed
     );
 
-    let step = slot_increase.unwrap_or(DEFAULT_SLOTS);
+    let slot_increase = slot_increase.unwrap_or(DEFAULT_SLOTS);
     let min_free = min_free.unwrap_or(DEFAULT_MIN_FREE);
     let ledger_info = ctx.accounts.ledger.to_account_info();
 
@@ -102,17 +84,31 @@ pub fn handler(
 
     // Created here, unconditionally, rather than left to whoever later delegates.
     //
-    // A permission cannot be added to a delegated ledger — `OpenPermission` takes it as
-    // `Account<Ledger>`, and while delegated the delegation program owns it — so repairing a
-    // missing one means undelegate, create, delegate. For the whole time it was wrong the ledger
-    // sat on a private validator readable by anyone holding a token, and nobody would have known.
+    // A permission cannot be added to a delegated ledger, so repairing a missing one means
+    // undelegate, create, delegate — and until then the ledger sits on a private validator
+    // readable by anyone holding a token, silently. The rent returns when the ledger closes, so
+    // a wallet that never touches a private validator has lent 567 bytes, not spent them.
     //
-    // The rent comes back when the ledger closes, so a wallet that never touches a private
-    // validator has lent 567 bytes, not spent them. That is the cheaper mistake.
+    // `permission` is not seed-checked here: the permission program derives and validates the
+    // canonical PDA inside the CPI below, so a wrong *empty* account fails there. A *non-empty*
+    // junk account slips past this `data_is_empty` gate and skips creation, leaving the ledger
+    // unprotected — but only the owner signs their own deposit, so that is self-harm, not an
+    // attack on anyone else, and a real client always passes the canonical permission.
     if ctx.accounts.permission.data_is_empty() {
         store_ledger(&ledger_info, &ledger)?;
         create_permission(&ctx, ledger.owner, ledger.bump)?;
     }
+
+    // Before the claim, not after: a deposit of a new mint into a ledger with no free slot
+    // would otherwise fail on the very growth this call is about to perform.
+    ensure_headroom(
+        &ledger_info,
+        &mut ledger,
+        &ctx.accounts.owner,
+        &ctx.accounts.system_program,
+        min_free,
+        slot_increase,
+    )?;
 
     let index = ledger.index_or_claim(&mint)?;
 
@@ -154,28 +150,14 @@ pub fn handler(
         )?;
     }
 
-    let entry = &mut ledger.entries[index];
-    entry.amount = entry.amount.checked_add(amount).ok_or(VaultError::Overflow)?;
-
-    // Deposit is basenet-only, so it is the natural place to keep the headroom band —
-    // a delegated ledger can never grow, and settle refuses rather than growing. Grows the
-    // account before the write below, so the buffer is always big enough for the state.
-    ensure_headroom(
-        &ledger_info,
-        &mut ledger,
-        &ctx.accounts.owner,
-        &ctx.accounts.system_program,
-        min_free,
-        step,
-    )?;
+    ledger.credit(index, amount)?;
 
     store_ledger(&ledger_info, &ledger)
 }
 
 /// Creates the ledger's permission, naming its owner at flags 0.
 fn create_permission(ctx: &Context<Deposit>, owner: Pubkey, bump: u8) -> Result<()> {
-    // One member: the owner. Deposit refuses off-curve owners, so the PDA branch that used
-    // to live here was dead code wearing a decision's clothes.
+    // One member: the owner. Off-curve owners are refused above, so there is no PDA case.
     let members = vec![Member { flags: 0, pubkey: owner }];
 
     let ledger_info = ctx.accounts.ledger.to_account_info();

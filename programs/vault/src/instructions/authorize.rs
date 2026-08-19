@@ -1,80 +1,69 @@
 use anchor_lang::prelude::*;
 
+use crate::instructions::open_pda_ledger::verify_pda_owner;
 use crate::state::*;
 
-/// Grants — or revokes — a session key's right to consent to debits of this ledger, locked
-/// to a single program authority. basenet only: the account may grow here, and a delegated
-/// account cannot realloc (the owner check inside `load_ledger` enforces this for free — a
-/// delegated ledger belongs to the delegation program).
+/// Grants — or revokes, with an all-zero key — a session key that may consent to debits of
+/// this ledger.
 ///
-/// Wallet ledgers only. A session key on a program's ledger would be a signature that
-/// consents on a program's behalf, which is exactly the capability the vault must never
-/// hand out: the program side of a movement consents by `invoke_signed` over its own
-/// seeds, and by nothing else.
+/// Neither side may be a program: not the ledger, not the key. A program consents by
+/// `invoke_signed` over its own seeds and nothing else, and a session key standing in for
+/// that is the one capability the vault must never hand out.
 ///
-/// The authority lock is what bounds a stolen session key. Unscoped, a leaked key could
-/// consent to a debit toward any program — including one deployed just to receive it and
-/// withdraw. Scoped, the worst it can do is spend the ledger through the one program the
-/// owner chose, whose payouts come back to the same ledger.
+/// The key is unscoped — any program may write a receipt against this ledger — so it is full
+/// spending authority over the balance. It cannot reach the wallet behind it: `withdraw`
+/// derives its ledger from the signer. Revoking a leaked key means undelegating first, since
+/// Anchor's owner check keeps this to basenet.
 #[derive(Accounts)]
 pub struct AssignLedgerAuthorization<'info> {
-    /// CHECK: raw because the account may resize here — `Account<Ledger>` cannot express
-    /// "grow me", for the same reason `deposit` handles the ledger raw.
-    #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
-    pub ledger: UncheckedAccount<'info>,
-
-    /// Also funds the trailer's rent on first assignment; a wallet ledger's rent payer is
-    /// always its owner, so this stays consistent with the growth rule.
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"ledger", owner.key().as_ref()],
+        bump = ledger.bump,
+        has_one = owner,
+    )]
+    pub ledger: Account<'info, Ledger>,
     pub owner: Signer<'info>,
-
-    pub system_program: Program<'info, System>,
 }
 
-pub fn handler(
-    ctx: Context<AssignLedgerAuthorization>,
-    authorized: Pubkey,
-    authority: Pubkey,
-) -> Result<()> {
-    let info = ctx.accounts.ledger.to_account_info();
-    let mut ledger = load_ledger(&info)?;
+pub fn handler(ctx: Context<AssignLedgerAuthorization>, authorized: Pubkey) -> Result<()> {
+    let ledger = &mut ctx.accounts.ledger;
     require!(!ledger.pda_auth, VaultError::CannotAuthorizePdaLedger);
 
-    let clearing = authorized == Pubkey::default();
-    // An off-curve authorized key could only ever sign via some program's `invoke_signed`,
-    // which would make this a program-consent grant wearing a session key's clothes.
-    require!(clearing || !is_pda(&authorized), VaultError::BadAuthorizedKey);
-    require!(clearing || authority != Pubkey::default(), VaultError::BadAuthorizedKey);
+    require!(
+        authorized == Pubkey::default() || !is_pda(&authorized),
+        VaultError::BadAuthorizedKey
+    );
 
-    if ledger._pad[0] != LEDGER_V_AUTHORIZED {
-        // Revoking on a ledger that never had a grant: nothing to clear, and migrating it
-        // just to write zeros would charge the owner rent for nothing.
-        if clearing {
-            return Ok(());
-        }
-        ledger._pad[0] = LEDGER_V_AUTHORIZED;
-        let new_space = info.data_len() + AUTH_TRAILER;
-        let needed = Rent::get()?.minimum_balance(new_space);
-        let have = info.lamports();
-        if needed > have {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer {
-                        from: ctx.accounts.owner.to_account_info(),
-                        to: info.clone(),
-                    },
-                ),
-                needed - have,
-            )?;
-        }
-        info.resize(new_space)?;
-        store_ledger(&info, &ledger)?;
-    }
+    ledger.authorized = authorized;
+    Ok(())
+}
 
-    let mut d = info.try_borrow_mut_data()?;
-    let o = d.len() - AUTH_TRAILER;
-    d[o..o + 32].copy_from_slice(&authorized.to_bytes());
-    d[o + 32..o + 64].copy_from_slice(&authority.to_bytes());
+/// Backfills a PDA ledger's stored authority — the member program it belongs to — for ledgers
+/// opened before that field was written. The owner PDA signs and its seeds derive it under
+/// `member_program`, so only the true program can set it, to its own key.
+#[derive(Accounts)]
+#[instruction(member_program: Pubkey, owner_seeds: Vec<Vec<u8>>)]
+pub struct AuthorizePdaLedger<'info> {
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"ledger", owner.key().as_ref()],
+        bump = ledger.bump,
+        has_one = owner,
+    )]
+    pub ledger: Account<'info, Ledger>,
+}
+
+pub fn authorize_pda_handler(
+    ctx: Context<AuthorizePdaLedger>,
+    member_program: Pubkey,
+    owner_seeds: Vec<Vec<u8>>,
+) -> Result<()> {
+    verify_pda_owner(&ctx.accounts.owner, &member_program, &owner_seeds)?;
+    let ledger = &mut ctx.accounts.ledger;
+    require!(ledger.pda_auth, VaultError::OwnerNotPda);
+    ledger.authorized = member_program;
     Ok(())
 }

@@ -3,28 +3,20 @@ use ephemeral_rollups_sdk::access_control::instructions::{
     ClosePermissionCpiBuilder, CreatePermissionCpiBuilder,
 };
 use ephemeral_rollups_sdk::access_control::structs::{Member, MembersArgs};
+use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
 use crate::instructions::open_pda_ledger::verify_pda_owner;
 use crate::state::*;
 
 /// Privacy's verbs — and privacy's only verbs.
 ///
-/// Every ledger is born private: the open instructions create the permission with it, and
-/// `close_ledger` buries them together. Some ledgers are meant to be watched, though — a
-/// progressive pot is worthless as a secret, and a copy of the figure in a public account
-/// would be a second number free to drift. So the opt-out is explicit: `make_public` deletes
-/// the permission, and the two `make_*_ledger_private` variants put it back.
+/// Every ledger is born private, and `close_ledger` buries the permission with it. Some are
+/// meant to be watched though — a progressive pot is worthless as a secret — so the opt-out is
+/// explicit: `make_public` deletes the permission, and the `make_*_ledger_private` pair puts
+/// it back, split like the open instructions because recreating one must derive its members.
 ///
-/// `make_public` serves both kinds of owner in one instruction because deleting has no
-/// members to derive — nothing about it depends on what the owner is. Recreating does, which
-/// is why the private side is split like the open side and proves its member program the same
-/// way.
-///
-/// Everything here takes the **owner's signature and nothing weaker** — privacy is the
-/// owner's to give up — plus the recorded rent payer, so the permission's rent keeps coming
-/// from and returning to one account. And everything insists the ledger is at home:
-/// `Account<Ledger>` checks the account's owner, which a delegated ledger fails — flipping
-/// privacy under a live rollup session would race whatever the validator has admitted.
+/// All of them are basenet-only for free: `Account<Ledger>` fails on a delegated ledger, so
+/// privacy cannot be flipped under a live rollup session.
 
 #[derive(Accounts)]
 pub struct MakePublic<'info> {
@@ -46,10 +38,9 @@ pub struct MakePublic<'info> {
     #[account(mut, address = ledger.rent_payer @ VaultError::NotRentPayer)]
     pub payer: Signer<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
 }
 
 pub fn make_public_handler(ctx: Context<MakePublic>) -> Result<()> {
@@ -86,7 +77,8 @@ pub struct MakeWalletLedgerPrivate<'info> {
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -96,7 +88,7 @@ pub fn make_wallet_ledger_private_handler(ctx: Context<MakeWalletLedgerPrivate>)
     require!(!is_pda(&ctx.accounts.owner.key()), VaultError::OwnerNotWallet);
     require!(
         ctx.accounts.permission.data_is_empty(),
-        VaultError::LedgerExists
+        VaultError::PermissionExists
     );
 
     let ledger_info = ctx.accounts.ledger.to_account_info();
@@ -139,7 +131,8 @@ pub struct MakePdaLedgerPrivate<'info> {
     #[account(mut)]
     pub permission: UncheckedAccount<'info>,
 
-    /// CHECK: the MagicBlock permission program.
+    /// CHECK: the MagicBlock permission program, pinned to its known address.
+    #[account(address = PERMISSION_PROGRAM_ID)]
     pub permission_program: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -152,7 +145,7 @@ pub fn make_pda_ledger_private_handler(
 ) -> Result<()> {
     require!(
         ctx.accounts.permission.data_is_empty(),
-        VaultError::LedgerExists
+        VaultError::PermissionExists
     );
     verify_pda_owner(&ctx.accounts.owner, &member_program, &owner_seeds)?;
 

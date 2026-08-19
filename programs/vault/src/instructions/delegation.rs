@@ -3,36 +3,24 @@ use ephemeral_rollups_sdk::anchor::{commit, delegate};
 use ephemeral_rollups_sdk::cpi::DelegateConfig;
 use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
 
-/// The reserves (`["vault"]` and the vault's ATA per mint) are never delegated — only
-/// ledgers are.
-/// That is exactly why `settle` can be pure bookkeeping inside the rollup.
+use crate::state::{load_ledger, VaultError};
+
+/// Only ledgers are delegated — the reserves stay on basenet, which is what keeps `settle`
+/// pure bookkeeping inside the rollup.
 #[delegate]
 #[derive(Accounts)]
 pub struct DelegateLedger<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    /// CHECK: the ledger owner; must sign to hand their own ledger to the rollup.
     pub owner: Signer<'info>,
 
-    /// CHECK: delegated by the SDK, which reassigns ownership to the delegation program.
+    /// CHECK: reassigned to the delegation program by the SDK.
     #[account(mut, del)]
     pub ledger: AccountInfo<'info>,
-
-    /// CHECK: the ledger's permission, when it has one. Unread here — see the handler.
-    pub permission: UncheckedAccount<'info>,
 }
 
 pub fn delegate_handler(ctx: Context<DelegateLedger>, validator: Option<Pubkey>) -> Result<()> {
-    // No permission is required. This vault settles across rollup boundaries and gates who may
-    // pay; it does not decide who may read. Whoever delegates a ledger chooses its destination,
-    // so whoever delegates is the only party that can know whether privacy is needed — and on an
-    // ordinary rollup a permission does nothing but cost rent.
-    //
-    // A ledger bound for a private validator must therefore have `open_permission` called first,
-    // by the client. Requiring one here proved only that an account existed, not that anything
-    // was protected.
-
     ctx.accounts.delegate_ledger(
         &ctx.accounts.payer,
         &[b"ledger", ctx.accounts.owner.key().as_ref()],
@@ -44,8 +32,8 @@ pub fn delegate_handler(ctx: Context<DelegateLedger>, validator: Option<Pubkey>)
     Ok(())
 }
 
-/// Ends a session. The commit is implicit — state is pushed back to basenet as part of
-/// undelegating, so there is no separate commit instruction to forget.
+/// Ends a session; the commit is implicit. Rollup-only, and unlike delegating it accepts the
+/// ledger's session key as well as its owner.
 #[commit]
 #[derive(Accounts)]
 pub struct Undelegate<'info> {
@@ -58,6 +46,14 @@ pub struct Undelegate<'info> {
 }
 
 pub fn undelegate_handler(ctx: Context<Undelegate>) -> Result<()> {
+    // Nothing downstream checks who is asking — the delegation program only asks whether the
+    // account is delegated.
+    let ledger = load_ledger(&ctx.accounts.ledger)?;
+    require!(
+        ledger.may_end_session(&ctx.accounts.payer.key()),
+        VaultError::NotAuthorizedToConsent
+    );
+
     commit_and_undelegate_accounts(
         &ctx.accounts.payer,
         vec![&ctx.accounts.ledger.to_account_info()],

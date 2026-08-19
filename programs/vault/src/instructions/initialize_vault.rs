@@ -3,31 +3,17 @@ use anchor_lang::system_program;
 
 use crate::state::*;
 
-/// Funds the SOL reserve PDA to its rent-exempt minimum. Must be run once, before
-/// anything else — every SOL path refuses to touch an unfunded vault.
+/// Funds the SOL reserve to its rent-exempt minimum. Run once, before anything else.
 ///
-/// The vault's rent is not part of any ledger's balance, so it cannot come out of
-/// deposits: the last lamports credited would be permanently unwithdrawable. Paying it
-/// up front, once, keeps `vault.lamports() - rent >= Σ SOL entries` true from genesis.
+/// Paid separately rather than out of deposits, or the last lamports credited to a ledger
+/// could never be withdrawn — every SOL path spends `lamports - floor`.
 ///
-/// Restricted to the program's upgrade authority: this is a deployment step, not a user
-/// one. **It must therefore be run before the upgrade authority is burned** — afterwards
-/// `upgrade_authority_address` is `None` and no signer can ever satisfy the constraint,
-/// which would strand the SOL path permanently. See the deployment order in the spec.
-///
-/// Idempotent — calling it again does nothing.
+/// Permissionless and idempotent: the vault is System-owned, so a plain transfer funds it
+/// whatever this instruction says.
 #[derive(Accounts)]
 pub struct InitializeVault<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-
-    /// CHECK: only its address is used, to reach the program data account.
-    #[account(constraint = program.programdata_address()? == Some(program_data.key()))]
-    pub program: Program<'info, crate::program::Vault>,
-
-    #[account(constraint = program_data.upgrade_authority_address == Some(payer.key())
-        @ VaultError::NotUpgradeAuthority)]
-    pub program_data: Account<'info, ProgramData>,
 
     /// CHECK: the SOL reserve. A System-owned PDA holding every deposited lamport.
     #[account(mut, seeds = [b"vault"], bump)]

@@ -1,51 +1,57 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::{
+    instruction::{AccountMeta, Instruction},
+    program::invoke_signed,
+};
 use ephemeral_rollups_sdk::consts::EPHEMERAL_VAULT_ID;
 use ephemeral_rollups_sdk::ephemeral_accounts::EphemeralAccount;
 
+use crate::instructions::open_pda_ledger::verify_pda_owner;
 use crate::state::*;
 
-/// A receipt is terms a program has authorised, written into an ephemeral account the vault
-/// owns, to be settled by a later top-level vault instruction.
-///
-/// It exists because of how a private rollup filters access: only a transaction's **top-level**
-/// program is checked against an account's permission, so a game can never reach a ledger by
-/// CPI. It can reach *this* — no permissioned account is involved — and the vault then does the
-/// settle itself, where it is top-level and always a member.
-///
-/// Only the **program's** consent is captured here: the authority signs via `invoke_signed`,
-/// committing to the terms. The human's consent for a debit is checked at settle instead —
-/// against the debited ledger, which this instruction deliberately cannot read (it is the
-/// permissioned account), and which is the only place that knows who may consent: the owner,
-/// or the session key the owner assigned for this authority.
-///
-/// Creation is therefore human-permissionless: a program can write a receipt debiting anyone,
-/// and it means nothing until someone entitled to consent signs the settle. An existing open
-/// receipt at the same nonce is overwritten — only this authority can ever write at its own
-/// addresses, and the real flows create and settle in one transaction, so whatever was
-/// sitting there is debris from a flow that never finished.
-///
-/// Layout: `state | human | authority | count | (mint, amount, to_human) * count`
+pub const RECEIPT_HEADER: usize = 123;
+pub const MOVEMENT_SIZE: usize = 32 + 8 + 1 + 1;
+pub const OWNER_SIZE: usize = 32;
 
-pub const RECEIPT_HEADER: usize = 1 + 32 + 32 + 1;
-pub const MOVEMENT_SIZE: usize = 32 + 8 + 1;
-pub const RECEIPT_OPEN: u8 = 0;
-pub const RECEIPT_SETTLED: u8 = 1;
+/// The receipt's 8-byte account discriminator, in Anchor's `account:<Name>` convention
+/// (`sha256("account:Receipt")[..8]`). The receipt is written and read by hand rather than as
+/// `Account<T>` — its length is variable and the ephemeral vault mints it — so `settle_receipt`
+/// checks this itself. It is the only thing that stops another vault-owned account, a `Ledger`
+/// above all, from being passed in the receipt slot and settled with no consent: there is no
+/// "open vs consumed" state to check, because a consumed receipt is owned by the member program
+/// and never reaches the handler.
+pub const RECEIPT_DISCRIMINATOR: [u8; 8] = [39, 154, 73, 106, 80, 102, 145, 153];
+
+const O_DISCRIMINATOR: usize = 0;
+const O_OWNER0: usize = 8;
+const O_AUTHORITY: usize = 40;
+const O_MEMBER: usize = 72;
+const O_CALLBACK_DISC: usize = 104;
+const O_SLOT: usize = 112;
+const O_LEDGERS: usize = 120;
+const O_COUNT: usize = 121;
+const O_ARGS_LEN: usize = 122;
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct Movement {
+    pub mint: Pubkey,
+    pub amount: u64,
+    /// Indices into the receipt's owner list — each names one exact ledger the movement moves between.
+    pub from: u8,
+    pub to: u8,
+}
 
 #[derive(Accounts)]
-#[instruction(nonce: u64)]
+#[instruction(movements: Vec<Movement>, member_program: Pubkey, authority_seeds: Vec<Vec<u8>>, owners: Vec<Pubkey>)]
 pub struct CreateReceipt<'info> {
-    /// CHECK: the party on the human side. Named, never required to sign — consent for a
-    /// debit is the settle's business, checked against this party's ledger there.
-    pub human: UncheckedAccount<'info>,
-
-    /// CHECK: the program's authority PDA. Must sign, which a game does via `invoke_signed`;
-    /// that signature propagates into this frame. Also pays the ephemeral rent, so it needs
-    /// lamports in the rollup.
+    /// CHECK: the program's authority PDA. Must sign, which a program does via `invoke_signed`.
     #[account(mut)]
     pub authority: UncheckedAccount<'info>,
 
     /// CHECK: created here and owned by this program, so nothing else can rewrite the terms.
-    #[account(mut, seeds = [b"receipt", authority.key().as_ref(), &nonce.to_le_bytes()], bump)]
+    /// PDA `["receipt", authority, owners[0]]`, derived and checked in the handler — a Vec-indexed
+    /// seed cannot be expressed in the account macro's IDL codegen.
+    #[account(mut)]
     pub receipt: UncheckedAccount<'info>,
 
     /// CHECK: the ephemeral rent vault.
@@ -56,33 +62,101 @@ pub struct CreateReceipt<'info> {
     pub magic_program: UncheckedAccount<'info>,
 }
 
-pub fn create_handler(
-    ctx: Context<CreateReceipt>,
-    nonce: u64,
+pub fn create_handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, CreateReceipt<'info>>,
     movements: Vec<Movement>,
+    member_program: Pubkey,
+    authority_seeds: Vec<Vec<u8>>,
+    owners: Vec<Pubkey>,
+    callback_disc: [u8; 8],
+    args: Vec<u8>,
 ) -> Result<()> {
     require!(ctx.accounts.authority.is_signer, VaultError::MissingProgramSignature);
-    // An empty receipt is allowed. A losing card authorises nothing, and the caller still
-    // needs the account to exist — the runtime rejects a transaction that declares a writable
-    // account which is never created.
     require!(movements.len() <= u8::MAX as usize, VaultError::NoAuthorization);
+    require!(args.len() <= u8::MAX as usize, VaultError::NoAuthorization);
+    require!(!owners.is_empty() && owners.len() <= u8::MAX as usize, VaultError::NoAuthorization);
 
-    let bump = ctx.bumps.receipt;
-    let authority_key = ctx.accounts.authority.key();
-    let nonce_le = nonce.to_le_bytes();
-    let len = RECEIPT_HEADER + movements.len() * MOVEMENT_SIZE;
+    // Not `authority.owner` — delegation rewrites that field.
+    verify_pda_owner(&ctx.accounts.authority, &member_program, &authority_seeds)?;
 
+    for (i, o) in owners.iter().enumerate() {
+        require!(!owners[..i].contains(o), VaultError::DuplicateLedger);
+    }
+    for m in movements.iter() {
+        require!(
+            (m.from as usize) < owners.len() && (m.to as usize) < owners.len(),
+            VaultError::NoAuthorization
+        );
+        require!(m.from != m.to, VaultError::NoAuthorization);
+    }
+    let ledger_count = owners.len();
+
+    // Approval happens here, so settle needs no consent. Every debited owner approves, and so
+    // does any wallet a credit would open a new slot for — the same rule plain settle enforces,
+    // so a program cannot seed a wallet with mints it never asked for. A PDA approves through its
+    // program's invoke_signed, a wallet by its own key or its session key. The owners' ledgers
+    // come first in remaining_accounts, in index order; the approver signers follow.
+    require!(ctx.remaining_accounts.len() >= ledger_count, VaultError::NoAuthorization);
+    let (ledger_infos, signers) = ctx.remaining_accounts.split_at(ledger_count);
+    for (idx, info) in ledger_infos.iter().enumerate() {
+        require_keys_eq!(*info.owner, crate::ID, VaultError::BadLedgerOwner);
+        let ledger = load_ledger(info)?;
+        require_keys_eq!(ledger.owner, owners[idx], VaultError::BadLedgerOwner);
+        let derived = Pubkey::create_program_address(
+            &[b"ledger", owners[idx].as_ref(), &[ledger.bump]],
+            &crate::ID,
+        )
+        .map_err(|_| error!(VaultError::BadLedgerOwner))?;
+        require_keys_eq!(derived, *info.key, VaultError::BadLedgerOwner);
+
+        let debited = movements.iter().any(|m| m.from as usize == idx);
+        let new_slot_credit = !ledger.pda_auth
+            && movements
+                .iter()
+                .any(|m| m.to as usize == idx && ledger.index_of(&m.mint).is_none());
+        if debited || new_slot_credit {
+            let approved = signers
+                .iter()
+                .any(|s| s.is_signer && (s.key() == owners[idx] || s.key() == ledger.authorized));
+            require!(approved, VaultError::NotAuthorizedToConsent);
+        }
+    }
+
+    let slot = Clock::get()?.slot;
     let receipt_info = ctx.accounts.receipt.to_account_info();
+
+    // A settled receipt the member program never closed still belongs to it. Named here, or the
+    // write below fails as `ExternalAccountDataModified` and says nothing about the cause.
+    require!(
+        receipt_info.data_is_empty() || receipt_info.owner == &crate::ID,
+        VaultError::ReceiptNotConsumed
+    );
+
+    // An earlier slot's receipt can never be settled, so it is debris. This slot's may be a
+    // live purchase whose terms would be rewritten under the player. Anything at this address is
+    // a receipt — the seeds are unique to them — so the slot alone decides live vs debris.
+    if receipt_info.data_len() >= RECEIPT_HEADER {
+        let d = receipt_info.try_borrow_data()?;
+        let created = u64::from_le_bytes(d[O_SLOT..O_SLOT + 8].try_into().unwrap());
+        require!(created != slot, VaultError::ReceiptLive);
+    }
+
+    let extra = owners.len() - 1;
+    let len = RECEIPT_HEADER + extra * OWNER_SIZE + movements.len() * MOVEMENT_SIZE + args.len();
+    let (receipt_pda, bump) = Pubkey::find_program_address(
+        &[b"receipt", ctx.accounts.authority.key().as_ref(), owners[0].as_ref()],
+        ctx.program_id,
+    );
+    require_keys_eq!(ctx.accounts.receipt.key(), receipt_pda, VaultError::BadAuthority);
+    let authority_key = ctx.accounts.authority.key();
+
     let authority_info = ctx.accounts.authority.to_account_info();
     let vault_info = ctx.accounts.ephemeral_vault.to_account_info();
     let bump_arr = [bump];
-    let seeds: [&[u8]; 4] = [b"receipt", authority_key.as_ref(), &nonce_le, &bump_arr];
+    let seeds: [&[u8]; 4] = [b"receipt", authority_key.as_ref(), owners[0].as_ref(), &bump_arr];
     let signer_seeds = [&seeds[..]];
     let account = EphemeralAccount::new(&authority_info, &receipt_info, &vault_info)
         .with_signer_seeds(&signer_seeds);
-    // Overwrite, never fail: a vault-owned account at this address can only be an OPEN
-    // receipt this same authority once wrote and abandoned. Settled receipts leave vault
-    // ownership before anything else can run, so they cannot be sitting here.
     if receipt_info.data_len() == 0 {
         account.create(len as u32)?;
     } else if receipt_info.data_len() != len {
@@ -90,160 +164,218 @@ pub fn create_handler(
     }
 
     let mut d = ctx.accounts.receipt.try_borrow_mut_data()?;
-    d[0] = RECEIPT_OPEN;
-    d[1..33].copy_from_slice(&ctx.accounts.human.key().to_bytes());
-    d[33..65].copy_from_slice(&authority_key.to_bytes());
-    d[65] = movements.len() as u8;
+    d[O_DISCRIMINATOR..O_DISCRIMINATOR + 8].copy_from_slice(&RECEIPT_DISCRIMINATOR);
+    d[O_OWNER0..O_OWNER0 + 32].copy_from_slice(&owners[0].to_bytes());
+    d[O_AUTHORITY..O_AUTHORITY + 32].copy_from_slice(&authority_key.to_bytes());
+    d[O_MEMBER..O_MEMBER + 32].copy_from_slice(&member_program.to_bytes());
+    d[O_CALLBACK_DISC..O_CALLBACK_DISC + 8].copy_from_slice(&callback_disc);
+    d[O_SLOT..O_SLOT + 8].copy_from_slice(&slot.to_le_bytes());
+    d[O_LEDGERS] = ledger_count as u8;
+    d[O_COUNT] = movements.len() as u8;
+    d[O_ARGS_LEN] = args.len() as u8;
+    for (i, o) in owners.iter().skip(1).enumerate() {
+        let at = RECEIPT_HEADER + i * OWNER_SIZE;
+        d[at..at + 32].copy_from_slice(&o.to_bytes());
+    }
+    let mv = RECEIPT_HEADER + extra * OWNER_SIZE;
     for (i, m) in movements.iter().enumerate() {
-        let o = RECEIPT_HEADER + i * MOVEMENT_SIZE;
+        let o = mv + i * MOVEMENT_SIZE;
         d[o..o + 32].copy_from_slice(&m.mint.to_bytes());
         d[o + 32..o + 40].copy_from_slice(&m.amount.to_le_bytes());
-        d[o + 40] = m.to_human as u8;
+        d[o + 40] = m.from;
+        d[o + 41] = m.to;
     }
+    let ao = mv + movements.len() * MOVEMENT_SIZE;
+    d[ao..ao + args.len()].copy_from_slice(&args);
     Ok(())
 }
 
-/// One movement. A receipt may carry several — collecting a card can pay out in more than one
-/// mint at once.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct Movement {
-    pub mint: Pubkey,
-    pub amount: u64,
-    /// true: program → human (a payout). false: human → program (a charge).
-    pub to_human: bool,
-}
-
-/// Settles a receipt. The program side consented at creation (its `invoke_signed`), and the
-/// human side consents **here**, where the debited ledger is finally in hand: any movement
-/// that debits the human requires `consenter` to sign and to be either the ledger's owner or
-/// the session key its owner assigned — for this receipt's authority, not just any program.
-/// A credit-only receipt still needs no signature at all, which is what keeps collects
-/// permissionless. Neither ledger can be substituted, because the receipt names their owners.
+/// The ledgers come first in `remaining_accounts`, one per index the movements reach, in index
+/// order; everything after them is forwarded to the callback.
 ///
-/// A debit of an off-curve human side is unrepresentable now: a PDA cannot sign a top-level
-/// instruction and a PDA ledger can never hold a session key. No live flow ever did that —
-/// programs pay each other through `settle` — and the door is better closed.
-///
-/// Afterwards the receipt is emptied and handed to the program that authorised it, so that
-/// program can close it and recover the rent it sponsored. The vault cannot close it itself:
-/// closing an ephemeral account needs the *sponsor's* signature, and the sponsor is the other
-/// program. Leaving it open would bleed the sponsor a little on every settle.
-///
-/// The handover doubles as proof. The receipt is a PDA of this program, so the authorising
-/// program could never have created it — finding it in their own hands means the vault
-/// settled and released it.
+/// - **Each index is pinned to its stored owner**, and every `pda_auth` ledger must store
+///   `member_program` as its authority — so a receipt reaches only that program's own ledgers.
+/// - **At most one ledger may be non-`pda_auth`.** That is the no-payment-rail property.
+/// - **No consent runs here** — every debit was approved by its owner at creation, so settle is
+///   permissionless and only executes.
+/// - **The callback should close the receipt**, though nothing here depends on it. Zeroed and
+///   handed over before the callback runs, one left behind is inert — it cannot be settled
+///   again, and proof of payment is the signature, not the account. Skipping the close costs
+///   the member program its rent and blocks its own receipt address until it closes it.
 #[derive(Accounts)]
 pub struct SettleReceipt<'info> {
     /// CHECK: must be owned by this program, which is what proves the vault wrote the terms.
     #[account(mut, owner = crate::ID)]
     pub receipt: UncheckedAccount<'info>,
 
-    /// CHECK: the authority named on the receipt. Only its `owner` is read — that is the
-    /// program the emptied receipt is handed back to.
+    /// CHECK: the authority named on the receipt. Compared against it, nothing more.
     pub authority: UncheckedAccount<'info>,
 
-    #[account(
-        mut,
-        seeds = [b"ledger", human_ledger.owner.as_ref()],
-        bump = human_ledger.bump,
-    )]
-    pub human_ledger: Account<'info, Ledger>,
+    /// CHECK: must equal the `member_program` proven into the receipt at creation.
+    pub callback_program: UncheckedAccount<'info>,
 
-    #[account(
-        mut,
-        seeds = [b"ledger", program_ledger.owner.as_ref()],
-        bump = program_ledger.bump,
-    )]
-    pub program_ledger: Account<'info, Ledger>,
-
-    /// CHECK: whoever consents to the debit of the human side — the ledger's owner, or its
-    /// assigned session key. Only examined when a movement debits the human; a credit-only
-    /// receipt ignores it entirely, so a collect passes any account here, unsigned.
-    pub consenter: UncheckedAccount<'info>,
+    /// CHECK: the vault's own authority, seedless so there is exactly one. It signs the
+    /// callback, which is what tells the member program a real settle from a direct call —
+    /// the receipt itself cannot say so, having been zeroed by then.
+    #[account(seeds = [], bump)]
+    pub vault_authority: UncheckedAccount<'info>,
 }
 
-pub fn settle_handler(ctx: Context<SettleReceipt>) -> Result<()> {
-    let (human, authority, movements) = {
+pub fn settle_handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, SettleReceipt<'info>>,
+) -> Result<()> {
+    let (owners, authority, member_program, callback_disc, movements, args) = {
         let d = ctx.accounts.receipt.try_borrow_data()?;
         require!(d.len() >= RECEIPT_HEADER, VaultError::NoAuthorization);
-        // The state byte is the only signal: an ephemeral account holds no lamports of its
-        // own — its rent lives with the magic vault — so a balance check says nothing here.
-        // A closed receipt keeps its bytes, so a replayed settle still sees SETTLED; and if the
-        // runtime ever reaps it, the owner check above fails instead. Either way, once.
-        require!(d[0] == RECEIPT_OPEN, VaultError::AlreadySettled);
+        // The discriminator is the whole defense against a `Ledger` — or any other vault-owned
+        // account — being passed here: `receipt` is only checked to be owned by this program, and
+        // settle runs no consent, trusting the terms were approved at creation.
+        require!(
+            d[O_DISCRIMINATOR..O_DISCRIMINATOR + 8] == RECEIPT_DISCRIMINATOR,
+            VaultError::NotAReceipt
+        );
 
-        let human = Pubkey::new_from_array(d[1..33].try_into().unwrap());
-        let authority = Pubkey::new_from_array(d[33..65].try_into().unwrap());
-        let count = d[65] as usize;
-        require!(d.len() >= RECEIPT_HEADER + count * MOVEMENT_SIZE, VaultError::NoAuthorization);
+        // Same slot, or nothing. Not primarily an attacker control — two transactions can share
+        // a slot — but it makes a client that splits creation from settlement fail immediately
+        // rather than work while leaving a window to rewrite the terms.
+        let created = u64::from_le_bytes(d[O_SLOT..O_SLOT + 8].try_into().unwrap());
+        require!(created == Clock::get()?.slot, VaultError::ReceiptExpired);
 
+        let owner0 = Pubkey::new_from_array(d[O_OWNER0..O_OWNER0 + 32].try_into().unwrap());
+        let authority = Pubkey::new_from_array(d[O_AUTHORITY..O_AUTHORITY + 32].try_into().unwrap());
+        let member = Pubkey::new_from_array(d[O_MEMBER..O_MEMBER + 32].try_into().unwrap());
+        let disc: [u8; 8] = d[O_CALLBACK_DISC..O_CALLBACK_DISC + 8].try_into().unwrap();
+        let n = d[O_LEDGERS] as usize;
+        let count = d[O_COUNT] as usize;
+        let args_len = d[O_ARGS_LEN] as usize;
+        require!(n >= 1, VaultError::NoAuthorization);
+        let mv = RECEIPT_HEADER + (n - 1) * OWNER_SIZE;
+        require!(
+            d.len() >= mv + count * MOVEMENT_SIZE + args_len,
+            VaultError::NoAuthorization
+        );
+
+        let mut owners = vec![owner0];
+        for i in 0..n - 1 {
+            let at = RECEIPT_HEADER + i * OWNER_SIZE;
+            owners.push(Pubkey::new_from_array(d[at..at + 32].try_into().unwrap()));
+        }
         let mut movements = Vec::with_capacity(count);
         for i in 0..count {
-            let o = RECEIPT_HEADER + i * MOVEMENT_SIZE;
+            let o = mv + i * MOVEMENT_SIZE;
             movements.push(Movement {
                 mint: Pubkey::new_from_array(d[o..o + 32].try_into().unwrap()),
                 amount: u64::from_le_bytes(d[o + 32..o + 40].try_into().unwrap()),
-                to_human: d[o + 40] == 1,
+                from: d[o + 40],
+                to: d[o + 41],
             });
         }
-        (human, authority, movements)
+        let ao = mv + count * MOVEMENT_SIZE;
+        (owners, authority, member, disc, movements, d[ao..ao + args_len].to_vec())
     };
+    let ledger_count = owners.len();
 
-    // Neither side is caller-chosen: the receipt names both owners.
-    require_keys_eq!(ctx.accounts.human_ledger.owner, human, VaultError::BadAuthority);
-    require_keys_eq!(ctx.accounts.program_ledger.owner, authority, VaultError::BadAuthority);
-
-    // The human side's consent, deferred from creation to the one instruction that holds
-    // their ledger. The session key is program-locked: it counts only for receipts of the
-    // authority the owner named, so a key leaked from one game consents to nothing else.
-    if movements.iter().any(|m| !m.to_human) {
-        let consenter = &ctx.accounts.consenter;
-        require!(consenter.is_signer, VaultError::MissingUserSignature);
-        let allowed = consenter.key() == human
-            || read_authorization(&ctx.accounts.human_ledger.to_account_info())?
-                .is_some_and(|(key, for_authority)| {
-                    key == consenter.key() && for_authority == authority
-                });
-        require!(allowed, VaultError::NotAuthorizedToConsent);
-    }
-    // The same two rules as `settle`, and for the same reasons — see the long note there.
-    // Never two humans, and both sides consented when the receipt was written: the program
-    // signed for its PDA, the human signed if debited.
-    //
-    // `human_ledger` is a name for the common case, not a constraint: it may itself be a
-    // program's ledger, which is how one program pays another (a game moving a share of each
-    // sale into a jackpot it cannot later withdraw). What is never allowed is *two* humans.
-    require!(
-        ctx.accounts.program_ledger.pda_auth || ctx.accounts.human_ledger.pda_auth,
-        VaultError::NotProgramMediated,
+    require_keys_eq!(ctx.accounts.authority.key(), authority, VaultError::BadAuthority);
+    require_keys_eq!(
+        ctx.accounts.callback_program.key(),
+        member_program,
+        VaultError::CallbackProgramMismatch
     );
 
-    for m in movements.iter() {
-        let (from, to): (&mut Account<Ledger>, &mut Account<Ledger>) = if m.to_human {
-            (&mut ctx.accounts.program_ledger, &mut ctx.accounts.human_ledger)
-        } else {
-            (&mut ctx.accounts.human_ledger, &mut ctx.accounts.program_ledger)
+    // Handled raw rather than as `Account<Ledger>`: the count is variable, and a deserialized
+    // copy would go stale behind the callback's CPI.
+    require!(ctx.remaining_accounts.len() >= ledger_count, VaultError::NoAuthorization);
+    let (ledger_infos, forwarded) = ctx.remaining_accounts.split_at(ledger_count);
+
+    let mut ledgers = Vec::with_capacity(ledger_count);
+    for (idx, (info, owner)) in ledger_infos.iter().zip(owners.iter()).enumerate() {
+        // Codes are off-enum on purpose: 7000 + check*100 + index. Transaction logs are off in
+        // a private rollup, so the error code is the only channel wide enough to say *which*
+        // ledger failed *which* check.
+        let code = |c: u32| -> Error {
+            ProgramError::Custom(7000 + c * 100 + idx as u32).into()
         };
-
-        let i = from.index_of(&m.mint).ok_or(VaultError::NoBalance)?;
-        from.entries[i].amount = from.entries[i]
-            .amount
-            .checked_sub(m.amount)
-            .ok_or(VaultError::Insufficient)?;
-
-        let j = to.index_or_claim(&m.mint)?;
-        to.entries[j].amount = to.entries[j]
-            .amount
-            .checked_add(m.amount)
-            .ok_or(VaultError::Overflow)?;
+        if info.owner != &crate::ID {
+            return Err(code(0));
+        }
+        let ledger = load_ledger(info)?;
+        if ledger.owner != *owner {
+            return Err(code(1));
+        }
+        let derived = Pubkey::create_program_address(
+            &[b"ledger", owner.as_ref(), &[ledger.bump]],
+            &crate::ID,
+        )
+        .map_err(|_| code(2))?;
+        if derived != *info.key {
+            return Err(code(2));
+        }
+        if ledger.pda_auth && ledger.authorized != member_program {
+            return Err(code(3));
+        }
+        if ledger_infos[..idx].iter().any(|p| p.key == info.key) {
+            return Err(code(4));
+        }
+        ledgers.push(ledger);
     }
 
-    // Hand it back: zero first, because an account's owner may only change while its data is
-    // all zeros. That also drops the SETTLED byte, but replay is already impossible — the
-    // account is no longer ours, so `owner = crate::ID` rejects a second settle.
-    require_keys_eq!(ctx.accounts.authority.key(), authority, VaultError::BadAuthority);
-    let new_owner = *ctx.accounts.authority.owner;
+    // Value can never move between two people, whatever the shape of the receipt.
+    require!(
+        ledgers.iter().filter(|l| !l.pda_auth).count() <= 1,
+        VaultError::NotProgramMediated
+    );
+
+    // No consent here: the debits were approved by their owners at creation. Settle only
+    // executes, so it is permissionless.
+    for m in movements.iter() {
+        let (f, t) = (m.from as usize, m.to as usize);
+        let i = ledgers[f].index_of(&m.mint).ok_or(VaultError::NoBalance)?;
+        ledgers[f].debit(i, m.amount)?;
+        let j = ledgers[t].index_or_claim(&m.mint)?;
+        ledgers[t].credit(j, m.amount)?;
+    }
+    for (info, ledger) in ledger_infos.iter().zip(ledgers.iter()) {
+        store_ledger(info, ledger)?;
+    }
+
+    // Consumed before the callback, not after: single-use is ours to guarantee, and a
+    // callback that never sees a live receipt cannot replay one. What replaces it as proof of
+    // payment is the signature below.
     ctx.accounts.receipt.try_borrow_mut_data()?.fill(0);
-    ctx.accounts.receipt.assign(&new_owner);
+
+    // Handed over so the callback can close it and take the rent back. Only the account's
+    // owner may close it, and only the member program can sign for the sponsor that paid —
+    // the two requirements sit in different programs, so ownership has to move first.
+    ctx.accounts.receipt.to_account_info().assign(&member_program);
+
+    let mut metas = vec![
+        AccountMeta::new(ctx.accounts.receipt.key(), false),
+        AccountMeta::new_readonly(ctx.accounts.vault_authority.key(), true),
+    ];
+    let mut infos = vec![
+        ctx.accounts.receipt.to_account_info(),
+        ctx.accounts.vault_authority.to_account_info(),
+        ctx.accounts.callback_program.to_account_info(),
+    ];
+    for a in forwarded {
+        metas.push(AccountMeta {
+            pubkey: a.key(),
+            // A callback signs its own work with its own seeds; it inherits nothing.
+            is_signer: false,
+            is_writable: a.is_writable,
+        });
+        infos.push(a.clone());
+    }
+    // Owner 0 travels in the data because the receipt has been zeroed by now.
+    let mut data = Vec::with_capacity(8 + 32 + args.len());
+    data.extend_from_slice(&callback_disc);
+    data.extend_from_slice(&owners[0].to_bytes());
+    data.extend_from_slice(&args);
+
+    invoke_signed(
+        &Instruction { program_id: member_program, accounts: metas, data },
+        &infos,
+        &[&[&[ctx.bumps.vault_authority]]],
+    )?;
     Ok(())
 }
