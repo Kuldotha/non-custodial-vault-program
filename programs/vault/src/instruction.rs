@@ -20,7 +20,6 @@ const SETTLE: [u8; 8] = [175, 42, 185, 87, 144, 131, 102, 212];
 const CREATE_RECEIPT: [u8; 8] = [187, 57, 104, 13, 15, 1, 219, 99];
 const SETTLE_RECEIPT: [u8; 8] = [216, 17, 200, 111, 7, 3, 233, 182];
 const ASSIGN_LEDGER_AUTHORIZATION: [u8; 8] = [116, 150, 47, 4, 211, 225, 133, 201];
-const AUTHORIZE_PDA_LEDGER: [u8; 8] = [103, 17, 112, 146, 88, 193, 202, 156];
 const CLOSE_LEDGER: [u8; 8] = [236, 179, 19, 235, 59, 77, 121, 118];
 const DELEGATE_LEDGER: [u8; 8] = [159, 3, 197, 64, 7, 12, 101, 66];
 const UNDELEGATE: [u8; 8] = [131, 148, 180, 198, 91, 104, 42, 238];
@@ -41,9 +40,6 @@ pub fn dispatch(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> 
         GROW_PDA_LEDGER => instructions::grow_pda_ledger::handler(program_id, accounts, data),
         ASSIGN_LEDGER_AUTHORIZATION => {
             instructions::authorize::assign_handler(program_id, accounts, data)
-        }
-        AUTHORIZE_PDA_LEDGER => {
-            instructions::authorize::authorize_pda_handler(program_id, accounts, data)
         }
         OPEN_WALLET_LEDGER => instructions::open_wallet_ledger::handler(program_id, accounts, data),
         OPEN_PDA_LEDGER => instructions::open_pda_ledger::handler(program_id, accounts, data),

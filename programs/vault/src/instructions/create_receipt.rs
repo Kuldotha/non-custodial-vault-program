@@ -9,7 +9,6 @@ use ephemeral_rollups_sdk::ephemeral_accounts::EphemeralAccount;
 
 use crate::error::VaultError;
 use crate::state::receipt::{self, Movement, RECEIPT_HEADER};
-use crate::state::Ledger;
 use crate::utils::pda::verify_pda_owner;
 
 #[derive(BorshDeserialize)]
@@ -22,16 +21,21 @@ struct Args {
     args: Vec<u8>,
 }
 
-/// Creates a receipt — an ephemeral, vault-owned account holding the terms. This is the approval:
-/// every owner a movement debits signs here, as does any wallet a credit would open a new slot for.
-/// Accounts: [authority, receipt, ephemeral_vault, magic_program] + ledgers[owners] + signers
+/// An ephemeral vault-owned account holding the terms. It touches no ledger, which is what lets a
+/// game reach it by CPI inside a private rollup (the ACL would refuse a game transaction that
+/// touched the player's ledger); consent is checked at settle instead. The receipt is seeded by and
+/// signed by its consenter (the session key), so nobody can mint one for someone else — one that
+/// debits or seeds a human it has no right to simply dies at settle.
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let args = Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
-    let [authority, receipt, ephemeral_vault, _magic_program, remaining @ ..] = accounts else {
+    let [authority, consenter, receipt, ephemeral_vault, _magic_program, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
     if !authority.is_signer {
         return Err(VaultError::MissingProgramSignature.into());
+    }
+    if !consenter.is_signer {
+        return Err(VaultError::NotAuthorizedToConsent.into());
     }
     if args.movements.len() > u8::MAX as usize || args.args.len() > u8::MAX as usize {
         return Err(VaultError::NoAuthorization.into());
@@ -60,50 +64,10 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }
     }
 
-    // Approval happens here, so settle needs no consent. Owners' ledgers come first in
-    // remaining_accounts, in index order; the approver signers follow.
-    let ledger_count = args.owners.len();
-    if remaining.len() < ledger_count {
-        return Err(VaultError::NoAuthorization.into());
-    }
-    let (ledger_infos, signers) = remaining.split_at(ledger_count);
-    for (idx, info) in ledger_infos.iter().enumerate() {
-        if info.owner != program_id {
-            return Err(VaultError::BadLedgerOwner.into());
-        }
-        let ledger = Ledger::read_from(&info.try_borrow_data()?)?;
-        if ledger.owner != args.owners[idx] {
-            return Err(VaultError::BadLedgerOwner.into());
-        }
-        let derived = Pubkey::create_program_address(
-            &[b"ledger", args.owners[idx].as_ref(), &[ledger.bump]],
-            program_id,
-        )
-        .map_err(|_| ProgramError::from(VaultError::BadLedgerOwner))?;
-        if derived != *info.key {
-            return Err(VaultError::BadLedgerOwner.into());
-        }
-
-        let debited = args.movements.iter().any(|m| m.from as usize == idx);
-        let new_slot_credit = !ledger.pda_auth
-            && args
-                .movements
-                .iter()
-                .any(|m| m.to as usize == idx && ledger.index_of(&m.mint).is_none());
-        if debited || new_slot_credit {
-            let approved = signers.iter().any(|s| {
-                s.is_signer && (*s.key == args.owners[idx] || *s.key == ledger.authorized)
-            });
-            if !approved {
-                return Err(VaultError::NotAuthorizedToConsent.into());
-            }
-        }
-    }
-
     let slot = Clock::get()?.slot;
 
     let (receipt_pda, bump) = Pubkey::find_program_address(
-        &[b"receipt", authority.key.as_ref(), args.owners[0].as_ref()],
+        &[b"receipt", authority.key.as_ref(), consenter.key.as_ref()],
         program_id,
     );
     if *receipt.key != receipt_pda {
@@ -124,7 +88,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     let len = receipt::len_for(args.owners.len(), args.movements.len(), args.args.len());
     let bump_arr = [bump];
-    let seeds: [&[u8]; 4] = [b"receipt", authority.key.as_ref(), args.owners[0].as_ref(), &bump_arr];
+    let seeds: [&[u8]; 4] = [b"receipt", authority.key.as_ref(), consenter.key.as_ref(), &bump_arr];
     let signer_seeds: [&[&[u8]]; 1] = [&seeds];
     let account = EphemeralAccount::new(authority, receipt, ephemeral_vault)
         .with_signer_seeds(&signer_seeds);
@@ -136,6 +100,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     receipt::write(
         &mut receipt.try_borrow_mut_data()?,
+        consenter.key,
         &args.owners,
         authority.key,
         &args.member_program,

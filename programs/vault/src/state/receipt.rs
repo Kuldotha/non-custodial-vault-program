@@ -11,19 +11,23 @@ use crate::error::VaultError;
 /// a vault-owned account.
 pub const RECEIPT_DISCRIMINATOR: [u8; 8] = [39, 154, 73, 106, 80, 102, 145, 153];
 
-pub const RECEIPT_HEADER: usize = 123;
+pub const RECEIPT_HEADER: usize = 155;
 pub const MOVEMENT_SIZE: usize = 32 + 8 + 1 + 1;
 pub const OWNER_SIZE: usize = 32;
 
 const O_DISCRIMINATOR: usize = 0;
-const O_OWNER0: usize = 8;
-const O_AUTHORITY: usize = 40;
-const O_MEMBER: usize = 72;
-const O_CALLBACK_DISC: usize = 104;
-const O_SLOT: usize = 112;
-const O_LEDGERS: usize = 120;
-const O_COUNT: usize = 121;
-const O_ARGS_LEN: usize = 122;
+/// The consent key that authored this receipt — the receipt's PDA is seeded by it and it signs
+/// creation, so a receipt is unforgeably its consenter's. Settle checks it against the human
+/// ledger's owner/authorized.
+const O_CONSENTER: usize = 8;
+const O_OWNER0: usize = 40;
+const O_AUTHORITY: usize = 72;
+const O_MEMBER: usize = 104;
+const O_CALLBACK_DISC: usize = 136;
+const O_SLOT: usize = 144;
+const O_LEDGERS: usize = 152;
+const O_COUNT: usize = 153;
+const O_ARGS_LEN: usize = 154;
 
 /// One value movement in a receipt. `from`/`to` index the receipt's owner list.
 #[derive(BorshDeserialize, BorshSerialize, Clone)]
@@ -49,6 +53,7 @@ pub fn slot_of(data: &[u8]) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub fn write(
     data: &mut [u8],
+    consenter: &Pubkey,
     owners: &[Pubkey],
     authority: &Pubkey,
     member: &Pubkey,
@@ -58,6 +63,7 @@ pub fn write(
     args: &[u8],
 ) {
     data[O_DISCRIMINATOR..O_DISCRIMINATOR + 8].copy_from_slice(&RECEIPT_DISCRIMINATOR);
+    data[O_CONSENTER..O_CONSENTER + 32].copy_from_slice(consenter.as_ref());
     data[O_OWNER0..O_OWNER0 + 32].copy_from_slice(owners[0].as_ref());
     data[O_AUTHORITY..O_AUTHORITY + 32].copy_from_slice(authority.as_ref());
     data[O_MEMBER..O_MEMBER + 32].copy_from_slice(member.as_ref());
@@ -84,6 +90,7 @@ pub fn write(
 
 /// A parsed receipt, as `settle_receipt` reads it.
 pub struct Receipt {
+    pub consenter: Pubkey,
     pub owners: Vec<Pubkey>,
     pub authority: Pubkey,
     pub member: Pubkey,
@@ -130,6 +137,7 @@ pub fn read(data: &[u8]) -> Result<Receipt, ProgramError> {
     }
     let ao = mv + count * MOVEMENT_SIZE;
     Ok(Receipt {
+        consenter: Pubkey::new_from_array(data[O_CONSENTER..O_CONSENTER + 32].try_into().unwrap()),
         owners,
         authority: Pubkey::new_from_array(data[O_AUTHORITY..O_AUTHORITY + 32].try_into().unwrap()),
         member: Pubkey::new_from_array(data[O_MEMBER..O_MEMBER + 32].try_into().unwrap()),

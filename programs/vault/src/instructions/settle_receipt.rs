@@ -13,22 +13,21 @@ use crate::error::VaultError;
 use crate::state::{receipt, Ledger};
 
 /// Settles a receipt and calls back into the program that authorised it, in the same instruction.
-/// The receipt is zeroed and handed over before the callback runs. Permissionless: the debits were
-/// approved at creation.
-/// Accounts: [receipt, authority, callback_program, vault_authority] + ledgers + forwarded
+/// Runs top-level as the vault, which owns every ledger, so it may read the human's ledger past the
+/// rollup ACL — the one place consent can be checked, which is why consent lives here and not at
+/// creation.
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
-    let [receipt_ai, authority, callback_program, vault_authority, remaining @ ..] = accounts else {
+    let [receipt_ai, authority, consenter, callback_program, vault_authority, remaining @ ..] =
+        accounts
+    else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-    // Must be owned by this program — proves the vault wrote the terms — and carry the receipt
-    // discriminator (checked in `receipt::read`).
     if receipt_ai.owner != program_id {
         return Err(ProgramError::IllegalOwner);
     }
 
     let r = receipt::read(&receipt_ai.try_borrow_data()?)?;
 
-    // Same slot, or nothing.
     if r.slot != Clock::get()?.slot {
         return Err(VaultError::ReceiptExpired.into());
     }
@@ -38,6 +37,9 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     if *callback_program.key != r.member {
         return Err(VaultError::CallbackProgramMismatch.into());
     }
+    if *consenter.key != r.consenter {
+        return Err(VaultError::BadAuthority.into());
+    }
 
     let ledger_count = r.owners.len();
     if remaining.len() < ledger_count {
@@ -45,8 +47,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     }
     let (ledger_infos, forwarded) = remaining.split_at(ledger_count);
 
-    // Off-enum codes: 7000 + check*100 + index. Transaction logs are off in a private rollup, so
-    // the error code is the only channel wide enough to say which ledger failed which check.
+    // Off-enum codes: 7000 + check*100 + index.
     let code = |c: u32, idx: usize| -> ProgramError { ProgramError::Custom(7000 + c * 100 + idx as u32) };
 
     let mut ledgers = Vec::with_capacity(ledger_count);
@@ -78,7 +79,23 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
         return Err(VaultError::NotProgramMediated.into());
     }
 
-    // No consent here: the debits were approved by their owners at creation.
+    // The one human ledger must have its owner or session key sign whenever it is debited or gets a
+    // new token slot. Program ledgers are already covered by `authorized == member` above.
+    if let Some(hi) = ledgers.iter().position(|l| !l.pda_auth) {
+        let debited = r.movements.iter().any(|m| m.from as usize == hi);
+        let new_slot = r
+            .movements
+            .iter()
+            .any(|m| m.to as usize == hi && ledgers[hi].index_of(&m.mint).is_none());
+        if debited || new_slot {
+            let ok = consenter.is_signer
+                && (*consenter.key == ledgers[hi].owner || *consenter.key == ledgers[hi].authorized);
+            if !ok {
+                return Err(VaultError::NotAuthorizedToConsent.into());
+            }
+        }
+    }
+
     for m in &r.movements {
         let (f, t) = (m.from as usize, m.to as usize);
         let i = ledgers[f].index_of(&m.mint).ok_or(VaultError::NoBalance)?;
@@ -90,9 +107,8 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
         ledger.store(info)?;
     }
 
-    // Consumed before the callback, not after: a callback that never sees a live receipt cannot
-    // replay one. Zeroing also wipes the discriminator, and the runtime's zero-on-reassign rule
-    // then makes the handoff below the only way ownership can move.
+    // Consumed before the callback: zeroing wipes the discriminator, and the runtime's
+    // zero-on-reassign rule then makes the handoff below the only way ownership can move.
     receipt_ai.try_borrow_mut_data()?.fill(0);
     receipt_ai.assign(&r.member);
 
@@ -107,7 +123,6 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     ];
     let mut infos = vec![receipt_ai.clone(), vault_authority.clone(), callback_program.clone()];
     for a in forwarded {
-        // A callback signs its own work with its own seeds; it inherits nothing.
         metas.push(AccountMeta { pubkey: *a.key, is_signer: false, is_writable: a.is_writable });
         infos.push(a.clone());
     }
