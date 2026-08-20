@@ -1,56 +1,40 @@
-use anchor_lang::prelude::*;
+use borsh::BorshDeserialize;
+use solana_program::{
+    account_info::AccountInfo, entrypoint::ProgramResult, program_error::ProgramError,
+    pubkey::Pubkey,
+};
 
-use crate::state::*;
+use crate::error::VaultError;
+use crate::state::Ledger;
+use crate::utils::account::ensure_headroom;
+use crate::utils::pda::{self, is_pda};
 
-/// Adds slots to an existing **program** ledger.
-///
-/// `deposit` grows a wallet's ledger as it goes, but it refuses an off-curve owner — so without
-/// this a program's ledger is stuck at whatever `open_pda_ledger` gave it, and a game that adds
-/// a fifteenth payout token has nowhere to put it. Wallets have no business here, and the
-/// off-curve assertion says so instead of leaving it implied.
-///
-/// Nothing about the rent model changes. The rent payer recorded at creation is the only account
-/// that may fund the increase, and the whole amount still comes back to them when the ledger is
-/// closed — so a sponsor who opened a program's ledger keeps paying for it and keeps getting it
-/// back, and nothing crosses between parties. `rent_payer` stays immutable.
-///
-/// A sponsor who has gone away leaves the ledger at its current size. Nothing is lost: closing it
-/// still returns every balance to the owner and the rent to the payer. Handling that case would
-/// mean letting `rent_payer` change, which is the thing that keeps rent uninteresting.
-#[derive(Accounts)]
-pub struct GrowPdaLedger<'info> {
-    /// CHECK: the program's PDA, signing via invoke_signed.
-    pub owner: Signer<'info>,
-
-    /// Funds the extra slots. `ensure_headroom` requires it to be the recorded rent payer.
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    /// CHECK: loaded and written by hand. As `Account<Ledger>` this would silently do nothing:
-    /// Anchor serialises its own copy on exit, after the handler, so the grown `entries` vector
-    /// would be overwritten by the original's shorter one — the account keeps the extra bytes and
-    /// the rent, and `capacity()` still reports the old count.
-    #[account(mut, seeds = [b"ledger", owner.key().as_ref()], bump)]
-    pub ledger: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
+#[derive(BorshDeserialize)]
+struct Args {
+    min_free: u16,
+    slot_increase: u16,
 }
 
-pub fn handler(ctx: Context<GrowPdaLedger>, min_free: u16, step: u16) -> Result<()> {
-    require!(is_pda(&ctx.accounts.owner.key()), VaultError::OwnerNotPda);
-    let info = ctx.accounts.ledger.to_account_info();
-    let mut ledger = load_ledger(&info)?;
-    // The seeds constraint re-derives the address; this is what `has_one = owner` was doing.
-    require_keys_eq!(ledger.owner, ctx.accounts.owner.key(), VaultError::BadLedgerOwner);
+/// Adds slots to a program ledger, funded by its recorded rent payer. basenet only.
+/// Accounts: [owner, payer, ledger, system_program]
+pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let Args { min_free, slot_increase } =
+        Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [owner, payer, ledger_ai, system_program, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer || !payer.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    if !is_pda(owner.key) {
+        return Err(VaultError::OwnerNotPda.into());
+    }
+    pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
 
-    ensure_headroom(
-        &info,
-        &mut ledger,
-        &ctx.accounts.payer,
-        &ctx.accounts.system_program,
-        min_free,
-        step,
-    )?;
-
-    store_ledger(&info, &ledger)
+    let mut l = Ledger::load_checked(ledger_ai, program_id)?;
+    if l.owner != *owner.key {
+        return Err(VaultError::BadLedgerOwner.into());
+    }
+    ensure_headroom(ledger_ai, &mut l, payer, system_program, min_free, slot_increase)?;
+    l.store(ledger_ai)
 }
