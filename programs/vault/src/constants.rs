@@ -21,7 +21,7 @@ pub const MAX_GROWTH: u16 = 256;
 
 pub const ENTRY_SIZE: usize = 32 + 8;
 
-/// Anchor account discriminator for `Ledger` — `sha256("account:Ledger")[..8]`. Kept byte-exact
-/// so native-written ledgers stay readable by the deployed Anchor state and by member programs
-/// that index into the raw bytes (approach A, wire-compatible).
+/// Anchor account discriminator for `Ledger` — `sha256("account:Ledger")[..8]`, so a ledger
+/// reads as an Anchor account to any Anchor-style client and to member programs that index
+/// into the raw bytes.
 pub const LEDGER_DISCRIMINATOR: [u8; 8] = [43, 41, 21, 213, 180, 176, 95, 32];

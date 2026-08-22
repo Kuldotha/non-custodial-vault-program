@@ -210,7 +210,9 @@ read.
 Funds `["vault"]` to `rent_exempt(0)`. Permissionless and idempotent: it only ever tops the
 vault up to its floor, so there is nothing to gate. It must run before any SOL path — the
 vault's rent cannot come out of a deposit, or the last lamports credited would be
-unwithdrawable — and every SOL path refuses an unfunded vault with `VaultNotInitialized`.
+unwithdrawable — and no SOL path accepts an unfunded vault: `deposit` refuses one with
+`VaultNotInitialized`, while `withdraw` and `close_ledger` subtract the floor before their
+reserve check, so on an unfunded vault they fail with `InsufficientReserve`.
 
 ### 3.2 `deposit(mint, amount, min_free, slot_increase)`
 
@@ -430,8 +432,11 @@ each instruction passes the filter on its own merits, without weakening the ACL.
 movements, the owner list, the callback discriminator and opaque args are written to an
 ephemeral vault-owned account at `["receipt", member_program, consenter]`, its rent fronted
 by the program's own ledger. No player ledger is present, so nothing is permissioned. Owner
-indices are bounds-checked, duplicates refused. A same-slot receipt at that address cannot
-be overwritten; an earlier slot's is debris and is reused. Finally a one-shot **reap task**
+indices are bounds-checked, duplicates refused. The owner list must include the sponsor —
+the authority PDA whose ledger fronted the rent — because `settle_receipt` closes the
+receipt back onto that ledger and finds it in the list; a receipt that omits it can never
+settle. A same-slot receipt at that address cannot be overwritten; an earlier slot's is
+debris and is reused. Finally a one-shot **reap task**
 is scheduled with the rollup's task scheduler, signed by the sponsor ledger (§3.11).
 
 **`settle_receipt()`** — top-level vault, so the filter admits it, and the one place
@@ -459,7 +464,9 @@ why consent lives at settle rather than creation. Checks, in order:
    receipt and the **vault authority** PDA (`[]`, as a signer) in front of the forwarded
    accounts. That signature is the proof the settle happened — nothing else can produce it,
    so the member program delivers if and only if it sees it.
-10. The receipt is closed back onto the sponsor ledger and the reap task cancelled.
+10. The receipt is closed back onto the sponsor ledger — located by the authority's entry in
+    the receipt's owner list, which is why the list must include it — and the reap task
+    cancelled.
 
 Ledger-validation failures report as `ProgramError::Custom(7000 + check*100 + index)` so a
 client can see which account failed which check; everything else uses the error enum.
@@ -541,8 +548,7 @@ its programs settle rather than withdraw anyway — it clears the moment the gam
   delegation state changes.
 - Reallocation of a delegated account is not possible. §2.2 and §3.6 are built on this.
 - No lamport ever moves inside the rollup: the reserves are never delegated and SOL is an
-  ordinary ledger entry. This was the deciding argument for SOL-as-entry over
-  SOL-as-lamports.
+  ordinary ledger entry — the property that decides SOL-as-entry over SOL-as-lamports.
 
 ---
 
@@ -552,7 +558,7 @@ its programs settle rather than withdraw anyway — it clears the moment the gam
 |---|---|---|
 | Create a ledger (32 slots, ~1.4 KB) | ~0.01 SOL rent | the rent payer |
 | Create its permission account | rent, refunded on close | the rent payer |
-| Growth (+16 slots, 640 B) | ~0.0045 SOL rent | the rent payer |
+| Growth (+32 slots, 1.28 KB, the default increment) | ~0.009 SOL rent | the rent payer |
 | Vault token account per mint | rent, once per mint ever | first depositor of that mint |
 | A receipt | rent, fronted by the sponsor ledger, returned at settle or reap | the member program |
 

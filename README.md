@@ -322,8 +322,9 @@ ledger and may read them past the filter — the one place the check is possible
 the session key that seeded and signed the receipt — must sign `settle_receipt` too, and must be
 the human ledger's owner or authorized key whenever that ledger is debited or gains a new mint
 slot. Every program ledger in the receipt must have the receipt's member program as its
-`authorized`, and at most one ledger may be human. A receipt that debits a human it has no right
-to simply dies at settle.
+`authorized`, and at most one ledger may be human. The ledger list must include the sponsor's
+own ledger — settle closes the receipt back onto it, and a receipt that omits it can never
+settle. A receipt that debits a human it has no right to simply dies at settle.
 
 The receipt's address is `["receipt", member_program, consenter]` — one live receipt per program
 per session key, unforgeably that session's. A stale unsettled receipt at that address is

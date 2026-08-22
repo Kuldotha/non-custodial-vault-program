@@ -49,10 +49,8 @@ pub fn delegate_handler(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[
 ///
 /// `payer` funds the magic commit and must be the transaction fee payer — the rollup only lets an
 /// account be written if it is delegated or is the fee payer, and the magic program locates the
-/// payer by that identity. `authority` is who the ledger names as owner: for a wallet ledger it is
-/// the same account as `payer`; for a treasury ledger the owning program signs as `authority`
-/// (via its seeds) while the admin pays, since a treasury PDA is neither the fee payer nor, in the
-/// jackpot's case, even delegated. `fees_vault` is the magic program's ephemeral vault.
+/// payer by that identity. `authority` is who the ledger names as owner; no signature is required
+/// of it. `fees_vault` is the magic program's ephemeral vault.
 /// Accounts: [payer, authority, ledger, magic_program, magic_context, fees_vault]
 pub fn undelegate_handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let [payer, _authority, ledger_ai, magic_program, magic_context, fees_vault, ..] = accounts else {
@@ -75,7 +73,7 @@ struct ProcessArgs {
     pda_seeds: Vec<Vec<u8>>,
 }
 
-/// The delegation program's callback that finalises undelegation — was injected by `#[ephemeral]`.
+/// The delegation program's callback that finalises undelegation.
 /// Accounts: [delegated_pda, buffer, payer, system_program]
 pub fn process_undelegation_handler(
     program_id: &Pubkey,

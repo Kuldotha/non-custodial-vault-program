@@ -5,8 +5,8 @@ use solana_program::{
 
 use crate::instructions;
 
-// Approach A: the wire discriminators are Anchor's `sha256("global:<name>")[..8]`, so existing
-// callers (scratch-cards' utils/vault.rs, any client, the IDL) keep working unchanged.
+// The wire discriminators are Anchor's `sha256("global:<name>")[..8]`, so any Anchor-style
+// client resolves them from the IDL unchanged.
 const INITIALIZE_VAULT: [u8; 8] = [48, 191, 163, 44, 71, 129, 63, 164];
 const OPEN_WALLET_LEDGER: [u8; 8] = [219, 161, 148, 96, 48, 166, 60, 149];
 const OPEN_PDA_LEDGER: [u8; 8] = [129, 231, 253, 170, 87, 172, 11, 29];
@@ -23,8 +23,8 @@ const ASSIGN_LEDGER_AUTHORIZATION: [u8; 8] = [116, 150, 47, 4, 211, 225, 133, 20
 const CLOSE_LEDGER: [u8; 8] = [236, 179, 19, 235, 59, 77, 121, 118];
 const DELEGATE_LEDGER: [u8; 8] = [159, 3, 197, 64, 7, 12, 101, 66];
 const UNDELEGATE: [u8; 8] = [131, 148, 180, 198, 91, 104, 42, 238];
-/// The delegation program's fixed callback discriminator — matched first, exactly as the
-/// `#[ephemeral]` macro used to inject a handler for it.
+/// The delegation program's undelegation callback. Its discriminator is fixed by the delegation
+/// program, not name-derived, so it is matched as a literal.
 const PROCESS_UNDELEGATION: [u8; 8] = [196, 28, 41, 206, 48, 37, 51, 167];
 /// Fired by the reap crank; the disc baked into every receipt at create time.
 pub const REAP_RECEIPT: [u8; 8] = [237, 1, 2, 3, 4, 5, 6, 7];

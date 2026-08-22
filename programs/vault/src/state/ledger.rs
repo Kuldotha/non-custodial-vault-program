@@ -31,7 +31,8 @@ pub struct Ledger {
     /// true when `owner` is off-curve, i.e. a program's PDA.
     pub pda_auth: bool,
     pub bump: u8,
-    /// Where the rent goes on close, and the only key that may grow it — always the owner.
+    /// Where the rent goes on close, and the only key that may grow it — the owner for a wallet
+    /// ledger, the sponsor for a PDA's.
     pub rent_payer: Pubkey,
     /// Wallet: a session key that may consent to debits, or zero. PDA: the member program.
     pub authorized: Pubkey,
