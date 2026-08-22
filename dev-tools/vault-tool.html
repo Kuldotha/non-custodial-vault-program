@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vault Dev Tool</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; background:#0d1117; color:#c9d1d9; margin:0; padding:24px; }
+  h1 { font-size:18px; margin:0 0 4px; } .sub { color:#8b949e; margin:0 0 20px; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-bottom:16px; }
+  label { display:block; color:#8b949e; font-size:12px; margin:8px 0 2px; }
+  input, select { width:100%; box-sizing:border-box; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; border-radius:6px; padding:8px; font:inherit; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; } .row > div { flex:1; min-width:160px; }
+  button { background:#238636; color:#fff; border:0; border-radius:6px; padding:9px 14px; font:inherit; cursor:pointer; margin:4px 6px 0 0; }
+  button.alt { background:#1f6feb; } button.warn { background:#9e6a03; } button.ghost { background:#30363d; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .mono { font-size:12px; word-break:break-all; } .k { color:#8b949e; }
+  #log { background:#010409; border:1px solid #30363d; border-radius:6px; padding:12px; height:230px; overflow:auto; font-size:12px; white-space:pre-wrap; }
+  a { color:#58a6ff; } .ok{color:#3fb950;} .err{color:#f85149;} .warnc{color:#d29922;}
+  .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;border:1px solid #30363d;}
+</style>
+</head>
+<body>
+<h1>Vault Dev Tool</h1>
+<p class="sub">Deposit · Withdraw · Delegate · Undelegate — signs with your browser wallet. Program <span class="mono">VAULTrDSU…</span></p>
+
+<div class="card">
+  <div class="row">
+    <div><label>Basenet RPC (deposit / withdraw / delegate)</label><input id="rpc" placeholder="https://…" value="https://api.mainnet-beta.solana.com" /></div>
+    <div><label>Rollup RPC (undelegate — TEE endpoint, token appended by Auth TEE)</label><input id="errpc" value="https://devnet-tee.magicblock.app" /></div>
+  </div>
+  <div style="margin-top:10px">
+    <button id="connect" class="alt">Connect wallet</button>
+    <button id="teeauth" class="ghost">Auth TEE</button>
+    <span id="who" class="mono k">not connected</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <div>
+      <label>Asset</label>
+      <select id="asset"><option value="sol">SOL</option><option value="token">SPL token</option></select>
+    </div>
+    <div><label>Mint (token only)</label><input id="mint" placeholder="token mint address" disabled /></div>
+    <div><label>Decimals</label><input id="dec" value="9" /></div>
+    <div><label>Amount (UI units)</label><input id="amt" value="0.01" /></div>
+  </div>
+  <div style="margin-top:12px">
+    <button id="create" class="alt" disabled>Create ledger</button>
+    <button id="deposit" disabled>Deposit</button>
+    <button id="withdraw" class="ghost" disabled>Withdraw</button>
+    <button id="delegate" class="alt" disabled>Delegate</button>
+    <button id="undelegate" class="warn" disabled>Undelegate</button>
+    <button id="refresh" class="ghost">Refresh ledger</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div><label>Slots (create ledger — token slots beyond SOL)</label><input id="slots" value="8" /></div>
+    <div><label>Validator for delegate (default = the TEE)</label><input id="validator" value="MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo" /></div>
+  </div>
+</div>
+
+<div class="card">
+  <div id="state" class="mono">Ledger: <span class="k">connect + refresh to load</span></div>
+</div>
+
+<div class="card"><div id="log"></div></div>
+
+<script type="module">
+import {
+  Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram,
+} from 'https://esm.sh/@solana/web3.js@1.98.0';
+import bs58 from 'https://esm.sh/bs58@6';
+
+const TEE_HOST = 'https://devnet-tee.magicblock.app';
+
+// ── program + infra constants (verified against the vault handlers) ──
+const VAULT = new PublicKey('VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV');
+const PERMISSION = new PublicKey('ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1');
+const DELEGATION = new PublicKey('DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh');
+const MAGIC_PROGRAM = new PublicKey('Magic11111111111111111111111111111111111111');
+const MAGIC_CONTEXT = new PublicKey('MagicContext1111111111111111111111111111111');
+const EPHEMERAL_VAULT = new PublicKey('MagicVau1t999999999999999999999999999999999');
+const TOKEN = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const ATOKEN = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+const SYSTEM = SystemProgram.programId;
+const SOL_MINT = new PublicKey('11111111111111111111111111111111'); // all-zero pubkey
+
+// anchor sha256("global:<name>")[..8], taken from the program dispatch
+const DISC = {
+  open_wallet_ledger: [219,161,148,96,48,166,60,149],
+  deposit: [242,35,198,137,82,225,242,182],
+  withdraw: [183,18,70,156,148,109,161,34],
+  delegate_ledger: [159,3,197,64,7,12,101,66],
+  undelegate: [131,148,180,198,91,104,42,238],
+};
+
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const u64 = n => { const b = new Uint8Array(8); let v = BigInt(n); for (let i=0;i<8;i++){ b[i]=Number(v&0xffn); v>>=8n; } return b; };
+const u16 = n => Uint8Array.of(n & 0xff, (n>>8) & 0xff);
+const cat = (...as) => { const t=as.reduce((s,a)=>s+a.length,0),o=new Uint8Array(t); let k=0; for(const a of as){o.set(a,k);k+=a.length;} return o; };
+const pda = (seeds, prog) => PublicKey.findProgramAddressSync(seeds, prog)[0];
+const ata = (owner, mint) => pda([owner.toBytes(), TOKEN.toBytes(), mint.toBytes()], ATOKEN);
+const ro=k=>({pubkey:k,isSigner:false,isWritable:false}), rw=k=>({pubkey:k,isSigner:false,isWritable:true});
+const sg=k=>({pubkey:k,isSigner:true,isWritable:true}), sgro=k=>({pubkey:k,isSigner:true,isWritable:false});
+
+let provider, wallet;
+const log = (m,c='') => { const d=document.createElement('div'); if(c)d.className=c; d.textContent=m; $('log').prepend(d); };
+const rpc = () => new Connection($('rpc').value.trim(), 'confirmed');
+const link = sig => `https://solscan.io/tx/${sig}`;
+
+$('asset').onchange = () => {
+  const t = $('asset').value === 'token';
+  $('mint').disabled = !t; $('dec').value = t ? '6' : '9';
+};
+
+$('connect').onclick = async () => {
+  provider = window.solana || window.backpack || window.solflare;
+  if (!provider) return log('No injected wallet found (Phantom/Backpack/Solflare).','err');
+  try { const r = await provider.connect(); wallet = new PublicKey((r.publicKey||provider.publicKey).toString());
+    $('who').textContent = wallet.toBase58(); log('connected '+wallet.toBase58(),'ok'); refresh();
+  } catch(e){ log('connect failed: '+e.message,'err'); }
+};
+
+// TEE auth: signed-challenge login, sets the Rollup RPC to the token'd endpoint.
+$('teeauth').onclick = guard(async () => {
+  const pubkey = wallet.toBase58();
+  const c = await (await fetch(`${TEE_HOST}/auth/challenge?pubkey=${pubkey}`)).json();
+  const signed = await provider.signMessage(new TextEncoder().encode(c.challenge));
+  const raw = signed.signature ?? signed;
+  const sig = typeof raw === 'string' ? raw : bs58.encode(raw);
+  const j = await (await fetch(`${TEE_HOST}/auth/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pubkey, challenge: c.challenge, signature: sig }),
+  })).json();
+  if (!j.token) throw new Error('TEE login failed: ' + JSON.stringify(j));
+  $('errpc').value = `${TEE_HOST}?token=${j.token}`;
+  log('TEE token acquired ✓ — Rollup RPC set','ok');
+});
+
+function amount() {
+  const dec = parseInt($('dec').value||'0',10);
+  const [w,f=''] = String($('amt').value).split('.');
+  return BigInt(w||'0')*(10n**BigInt(dec)) + BigInt((f+'0'.repeat(dec)).slice(0,dec)||'0');
+}
+function assetMint() { return $('asset').value==='token' ? new PublicKey($('mint').value.trim()) : SOL_MINT; }
+const seeds = w => ({
+  ledger: pda([enc.encode('ledger'), w.toBytes()], VAULT),
+});
+function permOf(ledger){ return pda([enc.encode('permission:'), ledger.toBytes()], PERMISSION); }
+const vaultPda = pda([enc.encode('vault')], VAULT);
+
+async function sendBasenet(keys, data, label) {
+  const conn = rpc();
+  const ix = new TransactionInstruction({ programId: VAULT, keys, data });
+  const tx = new Transaction().add(ix);
+  tx.feePayer = wallet;
+  tx.recentBlockhash = (await conn.getLatestBlockhash()).blockhash;
+  log(label+': signing…');
+  const signed = await provider.signTransaction(tx);
+  const sig = await conn.sendRawTransaction(signed.serialize(), { skipPreflight:false });
+  log(label+' sent: '+sig,'ok');
+  await conn.confirmTransaction(sig, 'confirmed');
+  log(label+' confirmed ✓ '+link(sig),'ok');
+  refresh();
+}
+
+// ── CREATE LEDGER ── (open_wallet_ledger; deposit also auto-creates)
+$('create').onclick = guard(async () => {
+  const led = seeds(wallet).ledger;
+  const slots = parseInt($('slots').value||'8',10);
+  const keys = [ sg(wallet), rw(led), rw(permOf(led)), ro(PERMISSION), ro(SYSTEM) ];
+  const data = cat(new Uint8Array(DISC.open_wallet_ledger), u16(slots));
+  await sendBasenet(keys, data, 'create ledger');
+});
+
+// ── DEPOSIT ──
+$('deposit').onclick = guard(async () => {
+  const mint = assetMint(), isSol = $('asset').value==='sol';
+  const led = seeds(wallet).ledger;
+  const vTok = isSol ? SYSTEM : ata(vaultPda, mint);
+  const oTok = isSol ? SYSTEM : ata(wallet, mint);
+  const keys = [ sg(wallet), rw(led), rw(permOf(led)), ro(PERMISSION), rw(vaultPda),
+                 rw(vTok), rw(oTok), ro(TOKEN), ro(SYSTEM) ];
+  const data = cat(new Uint8Array(DISC.deposit), mint.toBytes(), u64(amount()), Uint8Array.of(0), Uint8Array.of(0));
+  await sendBasenet(keys, data, 'deposit');
+});
+
+// ── WITHDRAW ──
+$('withdraw').onclick = guard(async () => {
+  const mint = assetMint(), isSol = $('asset').value==='sol';
+  const led = seeds(wallet).ledger;
+  const vTok = isSol ? SYSTEM : ata(vaultPda, mint);
+  const oTok = isSol ? SYSTEM : ata(wallet, mint);
+  const keys = [ sg(wallet), rw(led), rw(vaultPda), rw(vTok), rw(oTok), ro(TOKEN), ro(SYSTEM) ];
+  const data = cat(new Uint8Array(DISC.withdraw), mint.toBytes(), u64(amount()));
+  await sendBasenet(keys, data, 'withdraw');
+});
+
+// ── DELEGATE ── (basenet; CPIs the delegation program)
+$('delegate').onclick = guard(async () => {
+  const led = seeds(wallet).ledger;
+  const buffer = pda([enc.encode('buffer'), led.toBytes()], VAULT);
+  const record = pda([enc.encode('delegation'), led.toBytes()], DELEGATION);
+  const meta = pda([enc.encode('delegation-metadata'), led.toBytes()], DELEGATION);
+  const keys = [ sg(wallet), sgro(wallet), rw(buffer), rw(record), rw(meta), rw(led),
+                 ro(VAULT), ro(DELEGATION), ro(SYSTEM) ];
+  const v = $('validator').value.trim();
+  const valPart = v ? cat(Uint8Array.of(1), new PublicKey(v).toBytes()) : Uint8Array.of(0);
+  const data = cat(new Uint8Array(DISC.delegate_ledger), valPart);
+  await sendBasenet(keys, data, 'delegate');
+});
+
+// ── UNDELEGATE ── (runs on the rollup — send to the ER RPC)
+$('undelegate').onclick = guard(async () => {
+  const er = $('errpc').value.trim();
+  if (!er) return log('undelegate needs the Rollup RPC (ER endpoint) — fill it in.','warnc');
+  const led = seeds(wallet).ledger;
+  const keys = [ sg(wallet), ro(wallet), rw(led), ro(MAGIC_PROGRAM), rw(MAGIC_CONTEXT), rw(EPHEMERAL_VAULT) ];
+  const data = new Uint8Array(DISC.undelegate);
+  const conn = new Connection(er, 'confirmed');
+  const ix = new TransactionInstruction({ programId: VAULT, keys, data });
+  const tx = new Transaction().add(ix);
+  tx.feePayer = wallet;
+  tx.recentBlockhash = (await conn.getLatestBlockhash()).blockhash;
+  log('undelegate: signing (ER blockhash — wallet may object)…');
+  const signed = await provider.signTransaction(tx);
+  const sig = await conn.sendRawTransaction(signed.serialize(), { skipPreflight:true });
+  log('undelegate sent to ER: '+sig,'ok');
+  await conn.confirmTransaction(sig,'confirmed'); log('undelegate confirmed ✓','ok'); refresh();
+});
+
+// ── read + decode the ledger for display ──
+$('refresh').onclick = refresh;
+// Enable actions only in the state that makes them valid. Create is allowed unless the ledger is
+// CONFIRMED to exist, so a failed/uncertain read still lets you create one.
+function gate(state) { // 'disconnected' | 'none' | 'unknown' | 'home' | 'delegated'
+  const exists = state === 'home' || state === 'delegated';
+  $('create').disabled     = state === 'disconnected' || exists;
+  $('deposit').disabled    = state !== 'home';
+  $('withdraw').disabled   = state !== 'home';
+  $('delegate').disabled   = state !== 'home';
+  $('undelegate').disabled = state !== 'delegated';
+}
+async function refresh() {
+  if (!wallet) { gate('disconnected'); return; }
+  try {
+    const led = seeds(wallet).ledger;
+    const info = await rpc().getAccountInfo(led);
+    let s = `Ledger <span class="k">${led.toBase58()}</span>\n`;
+    if (!info) { s += '<span class="warnc">does not exist yet — create it</span>'; gate('none'); $('state').innerHTML=s; return; }
+    const owner = info.owner;
+    const home = owner.equals(VAULT), delegated = owner.equals(DELEGATION);
+    gate(delegated ? 'delegated' : home ? 'home' : 'unknown');
+    s += `state: <span class="pill">${delegated?'DELEGATED (on rollup)':home?'home (basenet)':owner.toBase58()}</span>\n`;
+    if (home) {
+      const d = info.data;
+      const auth = new PublicKey(d.slice(80,112));
+      const count = new DataView(d.buffer,d.byteOffset).getUint32(112,true);
+      s += `authorized: <span class="k">${auth.equals(SYSTEM)?'(none)':auth.toBase58()}</span>\n`;
+      s += `slots: ${count}\n`;
+      for (let i=0;i<count;i++){ const o=116+i*40; const m=new PublicKey(d.slice(o,o+32));
+        const amt=new DataView(d.buffer,d.byteOffset).getBigUint64(o+32,true);
+        if (i===0 || !m.equals(SOL_MINT)) s += `  [${i}] ${m.equals(SOL_MINT)?'SOL':m.toBase58()} = ${amt}\n`;
+      }
+    } else if (delegated) {
+      s += '<span class="k">delegated ledger data lives on the rollup; undelegate to read it here.</span>';
+    }
+    $('state').innerHTML = s;
+  } catch(e){ gate('unknown'); $('state').innerHTML='<span class="warnc">ledger read failed — check the Basenet RPC (public mainnet-beta often blocks localhost). Create is still available.</span>'; log('refresh failed: '+e.message,'err'); }
+}
+
+function guard(fn){ return async () => {
+  if (!wallet) return log('connect a wallet first','warnc');
+  try { await fn(); } catch(e){ log('error: '+(e.message||e),'err'); console.error(e); }
+}; }
+</script>
+</body>
+</html>
