@@ -9,15 +9,19 @@ use solana_program::{
     sysvar::Sysvar,
 };
 
+use ephemeral_rollups_sdk::consts::EPHEMERAL_VAULT_ID;
+use ephemeral_rollups_sdk::ephemeral_accounts::EphemeralAccount;
+
 use crate::error::VaultError;
 use crate::state::{receipt, Ledger};
+use crate::utils::crank;
 
 /// Settles a receipt and calls back into the program that authorised it, in the same instruction.
 /// Runs top-level as the vault, which owns every ledger, so it may read the human's ledger past the
 /// rollup ACL — the one place consent can be checked, which is why consent lives here and not at
 /// creation.
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> ProgramResult {
-    let [receipt_ai, authority, consenter, callback_program, vault_authority, remaining @ ..] =
+    let [receipt_ai, authority, consenter, callback_program, vault_authority, ephemeral_vault, _magic_program, magic_context, remaining @ ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -39,6 +43,12 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     }
     if *consenter.key != r.consenter {
         return Err(VaultError::BadAuthority.into());
+    }
+    // Settlement is not permissionless: the receipt's consenter — the session key that seeded and
+    // signed it at creation — must sign here too. It is the only author that can (the authority is
+    // an off-curve member PDA), and same-slot means it is already a signer of this transaction.
+    if !consenter.is_signer {
+        return Err(VaultError::NotAuthorizedToConsent.into());
     }
 
     let ledger_count = r.owners.len();
@@ -88,8 +98,8 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
             .iter()
             .any(|m| m.to as usize == hi && ledgers[hi].index_of(&m.mint).is_none());
         if debited || new_slot {
-            let ok = consenter.is_signer
-                && (*consenter.key == ledgers[hi].owner || *consenter.key == ledgers[hi].authorized);
+            // The consenter already signed (checked above); here it must be this ledger's party.
+            let ok = *consenter.key == ledgers[hi].owner || *consenter.key == ledgers[hi].authorized;
             if !ok {
                 return Err(VaultError::NotAuthorizedToConsent.into());
             }
@@ -107,10 +117,9 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
         ledger.store(info)?;
     }
 
-    // Consumed before the callback: zeroing wipes the discriminator, and the runtime's
-    // zero-on-reassign rule then makes the handoff below the only way ownership can move.
-    receipt_ai.try_borrow_mut_data()?.fill(0);
-    receipt_ai.assign(&r.member);
+    // Kill the discriminator so the receipt cannot be re-settled during the callback; the vault
+    // keeps ownership to close it off the sponsor ledger once the callback returns.
+    receipt_ai.try_borrow_mut_data()?[..8].fill(0);
 
     let (va_pda, va_bump) = Pubkey::find_program_address(&[], program_id);
     if *vault_authority.key != va_pda {
@@ -126,15 +135,25 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
         metas.push(AccountMeta { pubkey: *a.key, is_signer: false, is_writable: a.is_writable });
         infos.push(a.clone());
     }
-    // Owner 0 travels in the data because the receipt has been zeroed by now.
     let mut data = Vec::with_capacity(8 + 32 + r.args.len());
     data.extend_from_slice(&r.callback_disc);
     data.extend_from_slice(r.owners[0].as_ref());
     data.extend_from_slice(&r.args);
-
     invoke_signed(
         &Instruction { program_id: r.member, accounts: metas, data },
         &infos,
         &[&[&[va_bump]]],
-    )
+    )?;
+
+    if *ephemeral_vault.key != EPHEMERAL_VAULT_ID {
+        return Err(ProgramError::InvalidArgument);
+    }
+    let si = r.owners.iter().position(|o| *o == r.authority).ok_or(VaultError::BadAuthority)?;
+    let ledger_bump = [ledgers[si].bump];
+    let ledger_seeds: [&[u8]; 3] = [b"ledger", r.authority.as_ref(), &ledger_bump];
+    EphemeralAccount::new(&ledger_infos[si], receipt_ai, ephemeral_vault)
+        .with_signer_seeds(&[&ledger_seeds])
+        .close()?;
+
+    crank::cancel_reap(&ledger_infos[si], &r.authority, ledgers[si].bump, magic_context, receipt_ai.key)
 }

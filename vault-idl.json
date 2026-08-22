@@ -1,5 +1,5 @@
 {
-  "address": "9vDAQgdHWCPQZabumgcuwoSLzWnRyQkSM1EHQnW8YXjs",
+  "address": "VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV",
   "metadata": {
     "name": "vault",
     "version": "0.1.0",
@@ -10,8 +10,7 @@
     {
       "name": "assign_ledger_authorization",
       "docs": [
-        "Grants or revokes a session key that may consent to debits of a wallet ledger. basenet",
-        "only; the owner signs. An all-zero key revokes."
+        "basenet only; the owner signs. An all-zero key revokes."
       ],
       "discriminator": [
         116,
@@ -49,77 +48,13 @@
         },
         {
           "name": "owner",
-          "signer": true,
-          "relations": [
-            "ledger"
-          ]
+          "signer": true
         }
       ],
       "args": [
         {
           "name": "authorized",
           "type": "pubkey"
-        }
-      ]
-    },
-    {
-      "name": "authorize_pda_ledger",
-      "docs": [
-        "Backfills a PDA ledger's stored member program, for ledgers opened before the field was",
-        "written. The owner PDA signs and its seeds prove it under `member_program`."
-      ],
-      "discriminator": [
-        103,
-        17,
-        112,
-        146,
-        88,
-        193,
-        202,
-        156
-      ],
-      "accounts": [
-        {
-          "name": "owner",
-          "signer": true,
-          "relations": [
-            "ledger"
-          ]
-        },
-        {
-          "name": "ledger",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  108,
-                  101,
-                  100,
-                  103,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "owner"
-              }
-            ]
-          }
-        }
-      ],
-      "args": [
-        {
-          "name": "member_program",
-          "type": "pubkey"
-        },
-        {
-          "name": "owner_seeds",
-          "type": {
-            "vec": "bytes"
-          }
         }
       ]
     },
@@ -149,10 +84,6 @@
         },
         {
           "name": "rent_payer",
-          "docs": [
-            "Receives the rent back and must sign. Recorded when the ledger was opened; for a",
-            "wallet's ledger it is the owner, so this is the owner signing twice over."
-          ],
           "writable": true,
           "signer": true
         },
@@ -202,8 +133,7 @@
           "writable": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         },
         {
           "name": "token_program",
@@ -219,13 +149,7 @@
     {
       "name": "create_receipt",
       "docs": [
-        "Creates a receipt — an ephemeral, vault-owned account holding the terms. This is the",
-        "approval: every owner a movement debits signs here, as does any wallet a credit would open",
-        "a new slot for, so settle needs no further consent.",
-        "",
-        "`member_program` is proven, not trusted: the authority must sign, and `authority_seeds`",
-        "must derive it under that program. It is the only program the settle will call back.",
-        "`args` are opaque here — stored verbatim and handed back to that callback."
+        "Creates a vault-owned receipt for the program's side; a debit binds only once its settle is consented."
       ],
       "discriminator": [
         187,
@@ -240,15 +164,62 @@
       "accounts": [
         {
           "name": "authority",
-          "writable": true
+          "signer": true
+        },
+        {
+          "name": "authority_ledger",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  101,
+                  100,
+                  103,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "consenter",
+          "signer": true
         },
         {
           "name": "receipt",
-          "docs": [
-            "PDA `[\"receipt\", authority, owners[0]]`, derived and checked in the handler — a Vec-indexed",
-            "seed cannot be expressed in the account macro's IDL codegen."
-          ],
-          "writable": true
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  99,
+                  101,
+                  105,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "member_program"
+              },
+              {
+                "kind": "account",
+                "path": "consenter"
+              }
+            ]
+          }
         },
         {
           "name": "ephemeral_vault",
@@ -256,7 +227,13 @@
           "address": "MagicVau1t999999999999999999999999999999999"
         },
         {
-          "name": "magic_program"
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
         }
       ],
       "args": [
@@ -304,8 +281,7 @@
     {
       "name": "delegate_ledger",
       "docs": [
-        "Hands a ledger to the rollup. No permission is required — a ledger bound for a private",
-        "validator must have had one opened first, by whoever delegates it."
+        "Hands a ledger to the rollup. Refuses without a permission."
       ],
       "discriminator": [
         159,
@@ -464,7 +440,7 @@
         },
         {
           "name": "owner_program",
-          "address": "9vDAQgdHWCPQZabumgcuwoSLzWnRyQkSM1EHQnW8YXjs"
+          "address": "VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV"
         },
         {
           "name": "delegation_program",
@@ -486,10 +462,6 @@
     },
     {
       "name": "deposit",
-      "docs": [
-        "Wallet → vault. `mint` selects the asset; `SOL_MINT` moves lamports. Creates the ledger",
-        "and its permission on first use, and tops up the free-slot band."
-      ],
       "discriminator": [
         242,
         35,
@@ -508,9 +480,6 @@
         },
         {
           "name": "ledger",
-          "docs": [
-            "`create_ledger_account` for why."
-          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -537,8 +506,7 @@
           "writable": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         },
         {
           "name": "vault",
@@ -560,13 +528,11 @@
         },
         {
           "name": "vault_token",
-          "docs": [
-            "created with `create_idempotent`. Placeholder on the SOL path, so it can carry",
-            "neither a type nor a `mut` constraint; validated by hand in the handler."
-          ]
+          "writable": true
         },
         {
-          "name": "owner_token"
+          "name": "owner_token",
+          "writable": true
         },
         {
           "name": "token_program",
@@ -603,7 +569,7 @@
     {
       "name": "grow_pda_ledger",
       "docs": [
-        "Adds slots to a program's ledger, funded by its sponsor. Wallets grow through `deposit`."
+        "Adds slots to a program's ledger, funded by its sponsor."
       ],
       "discriminator": [
         197,
@@ -622,17 +588,11 @@
         },
         {
           "name": "payer",
-          "docs": [
-            "Funds the extra slots. `ensure_headroom` requires it to be the recorded rent payer."
-          ],
           "writable": true,
           "signer": true
         },
         {
           "name": "ledger",
-          "docs": [
-            "cannot be used here."
-          ],
           "writable": true,
           "pda": {
             "seeds": [
@@ -673,8 +633,7 @@
     {
       "name": "initialize_vault",
       "docs": [
-        "Funds [\"vault\"] to its rent floor. Permissionless and idempotent; run it once before",
-        "anything touches the SOL path."
+        "Funds [\"vault\"] to its rent floor. Permissionless and idempotent."
       ],
       "discriminator": [
         48,
@@ -720,7 +679,7 @@
     {
       "name": "make_pda_ledger_private",
       "docs": [
-        "Takes it back for a program's PDA, with the same proof `open_pda_ledger` demands."
+        "Reclaims privacy for a program's PDA, with the same proof open_pda_ledger demands."
       ],
       "discriminator": [
         200,
@@ -742,16 +701,11 @@
         },
         {
           "name": "payer",
-          "docs": [
-            "Pays the permission's rent. Must be the recorded rent payer, so both rents come from",
-            "and return to one account — buying no membership beyond what the sponsor already has."
-          ],
           "writable": true,
           "signer": true
         },
         {
           "name": "ledger",
-          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -777,8 +731,7 @@
           "writable": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         },
         {
           "name": "system_program",
@@ -801,8 +754,7 @@
     {
       "name": "make_public",
       "docs": [
-        "Deletes a ledger's permission — the owner explicitly giving privacy up, for a ledger",
-        "that is meant to be watched. The only way a ledger becomes public."
+        "Deletes a ledger's permission — the only way a ledger becomes public."
       ],
       "discriminator": [
         41,
@@ -850,15 +802,11 @@
         },
         {
           "name": "payer",
-          "docs": [
-            "Receives the rent and must sign, as the permission program requires."
-          ],
           "writable": true,
           "signer": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         }
       ],
       "args": []
@@ -866,7 +814,7 @@
     {
       "name": "make_wallet_ledger_private",
       "docs": [
-        "Takes it back for a wallet: the permission returns, naming the owner."
+        "Reclaims privacy for a wallet; the permission returns naming the owner."
       ],
       "discriminator": [
         176,
@@ -881,9 +829,6 @@
       "accounts": [
         {
           "name": "owner",
-          "docs": [
-            "Also the rent payer: a wallet funds its own ledger, and both rents return to it."
-          ],
           "writable": true,
           "signer": true,
           "relations": [
@@ -892,7 +837,6 @@
         },
         {
           "name": "ledger",
-          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -918,8 +862,7 @@
           "writable": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         },
         {
           "name": "system_program",
@@ -931,8 +874,7 @@
     {
       "name": "open_pda_ledger",
       "docs": [
-        "Opens an empty ledger for a program's PDA, sponsor-funded. The member program is",
-        "proven by deriving the owner from its seeds — a wrong program is unconstructible."
+        "Opens an empty ledger for a program's PDA, sponsor-funded; the owner is derived from its seeds."
       ],
       "discriminator": [
         129,
@@ -951,10 +893,6 @@
         },
         {
           "name": "payer",
-          "docs": [
-            "Pays the rent and becomes the recorded rent payer: who it returns to on close, and",
-            "the only account that may later grow the ledger."
-          ],
           "writable": true,
           "signer": true
         },
@@ -986,8 +924,7 @@
           "writable": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         },
         {
           "name": "system_program",
@@ -1014,8 +951,7 @@
     {
       "name": "open_wallet_ledger",
       "docs": [
-        "Opens an empty wallet ledger at a chosen size, owner-funded. A zero-amount `deposit`",
-        "does the same at the default size."
+        "Wallet → vault. `mint` selects the asset; SOL_MINT moves lamports. Creates the ledger and its permission on first use."
       ],
       "discriminator": [
         219,
@@ -1030,9 +966,6 @@
       "accounts": [
         {
           "name": "owner",
-          "docs": [
-            "Pays its own rent, which is what makes it the rent payer on record."
-          ],
           "writable": true,
           "signer": true
         },
@@ -1064,8 +997,7 @@
           "writable": true
         },
         {
-          "name": "permission_program",
-          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+          "name": "permission_program"
         },
         {
           "name": "system_program",
@@ -1117,9 +1049,65 @@
       ]
     },
     {
+      "name": "reap_receipt",
+      "docs": [
+        "Closes an abandoned (never-settled) receipt, returning rent to the sponsor. Idempotent."
+      ],
+      "discriminator": [
+        188,
+        144,
+        140,
+        217,
+        217,
+        136,
+        0,
+        255
+      ],
+      "accounts": [
+        {
+          "name": "receipt",
+          "writable": true
+        },
+        {
+          "name": "authority_ledger",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  101,
+                  100,
+                  103,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority_ledger.owner",
+                "account": "Ledger"
+              }
+            ]
+          }
+        },
+        {
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "settle",
       "docs": [
-        "Moves value between two ledgers. Pure bookkeeping — the reserves are untouched."
+        "The only cross-ledger movement. Pure bookkeeping; reserves untouched."
       ],
       "discriminator": [
         175,
@@ -1182,10 +1170,7 @@
         },
         {
           "name": "src_authority",
-          "docs": [
-            "`invoke_signed`. The destination needs no such account: a credit is not authorised",
-            "by anyone, and `dst.owner` is already bound to `dst` by the seeds above."
-          ]
+          "signer": true
         },
         {
           "name": "dst_consenter"
@@ -1205,13 +1190,8 @@
     {
       "name": "settle_receipt",
       "docs": [
-        "Settles a receipt and calls back into the program that authorised it, in the same",
-        "instruction. The receipt is zeroed and handed over *before* the callback runs, so the",
-        "callback is told the terms in its instruction data rather than reading them — proof of",
-        "payment is `vault_authority`'s signature on that call, not the account.",
-        "",
-        "Permissionless: the debits were approved at creation, so settle only executes them and",
-        "fires the callback. Remaining accounts are forwarded with their privileges intact."
+        "Settles a receipt. Debiting the human needs the consenter (owner or session key) to sign; credits need nobody.",
+        "Then pass the owners’ ledgers (writable, one per receipt owner) followed by the callback’s forwarded accounts."
       ],
       "discriminator": [
         216,
@@ -1229,49 +1209,28 @@
           "writable": true
         },
         {
-          "name": "authority"
+          "name": "authority",
+          "docs": [
+            "The receipt's member-program authority (off-curve)."
+          ]
+        },
+        {
+          "name": "consenter",
+          "signer": true
         },
         {
           "name": "callback_program"
         },
         {
           "name": "vault_authority",
-          "docs": [
-            "callback, which is what tells the member program a real settle from a direct call —",
-            "the receipt itself cannot say so, having been zeroed by then."
-          ],
           "pda": {
             "seeds": []
           }
-        }
-      ],
-      "args": []
-    },
-    {
-      "name": "undelegate",
-      "docs": [
-        "Ends the session and returns the ledger to basenet. Sent to the rollup, not to basenet;",
-        "the commit is implicit."
-      ],
-      "discriminator": [
-        131,
-        148,
-        180,
-        198,
-        91,
-        104,
-        42,
-        238
-      ],
-      "accounts": [
-        {
-          "name": "payer",
-          "writable": true,
-          "signer": true
         },
         {
-          "name": "ledger",
-          "writable": true
+          "name": "ephemeral_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
         },
         {
           "name": "magic_program",
@@ -1286,9 +1245,76 @@
       "args": []
     },
     {
+      "name": "undelegate",
+      "docs": [
+        "Ends the session and returns the ledger to basenet. Commit is implicit."
+      ],
+      "discriminator": [
+        131,
+        148,
+        180,
+        198,
+        91,
+        104,
+        42,
+        238
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true,
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "The ledger's named owner; permissionless, so not a required signer."
+          ]
+        },
+        {
+          "name": "ledger",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  101,
+                  100,
+                  103,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "magic_program",
+          "address": "Magic11111111111111111111111111111111111111"
+        },
+        {
+          "name": "magic_context",
+          "writable": true,
+          "address": "MagicContext1111111111111111111111111111111"
+        },
+        {
+          "name": "fees_vault",
+          "writable": true,
+          "address": "MagicVau1t999999999999999999999999999999999"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "withdraw",
       "docs": [
-        "Vault → wallet, and only ever the signer's own — no other beneficiary is expressible."
+        "Vault → wallet. The destination is derived from the signer, never passed."
       ],
       "discriminator": [
         183,
@@ -1351,10 +1377,12 @@
           }
         },
         {
-          "name": "vault_token"
+          "name": "vault_token",
+          "writable": true
         },
         {
-          "name": "owner_token"
+          "name": "owner_token",
+          "writable": true
         },
         {
           "name": "token_program",
@@ -1416,12 +1444,12 @@
     {
       "code": 6004,
       "name": "NotProgramMediated",
-      "msg": "At least one side of a movement must be a program ledger"
+      "msg": "settle requires exactly one program side and one human side"
     },
     {
       "code": 6005,
       "name": "MissingProgramSignature",
-      "msg": "The program side must sign, by invoke_signed over its own seeds"
+      "msg": "The program side of a settle must sign"
     },
     {
       "code": 6006,
@@ -1440,133 +1468,113 @@
     },
     {
       "code": 6009,
+      "name": "GrowNotNeeded",
+      "msg": "This ledger already has enough free slots"
+    },
+    {
+      "code": 6010,
       "name": "BadSlotCount",
       "msg": "Slot count must be between 1 and 256"
     },
     {
-      "code": 6010,
+      "code": 6011,
       "name": "PermissionFailed",
       "msg": "Creating the ledger's permission account failed"
     },
     {
-      "code": 6011,
-      "name": "PermissionExists",
-      "msg": "This ledger already has a permission account"
+      "code": 6012,
+      "name": "MissingPermission",
+      "msg": "This ledger has no permission account — create one before delegating"
     },
     {
-      "code": 6012,
+      "code": 6013,
       "name": "MissingTokenAccounts",
       "msg": "A token account pair is missing for a non-zero balance"
     },
     {
-      "code": 6013,
+      "code": 6014,
       "name": "NotCanonicalReserve",
       "msg": "The reserve must be the vault's associated token account for this mint"
     },
     {
-      "code": 6014,
+      "code": 6015,
       "name": "VaultNotInitialized",
       "msg": "The vault is not funded to its rent floor — call initialize_vault first"
     },
     {
-      "code": 6015,
+      "code": 6016,
+      "name": "NotUpgradeAuthority",
+      "msg": "Only the program's upgrade authority may initialize the vault"
+    },
+    {
+      "code": 6017,
       "name": "BadLedgerOwner",
       "msg": "Ledger account is not owned by this program"
     },
     {
-      "code": 6016,
-      "name": "NoAuthorization",
-      "msg": "Malformed receipt — bad counts, sizes, or account list"
-    },
-    {
-      "code": 6017,
-      "name": "BadAuthority",
-      "msg": "The authority account does not match the one on record"
-    },
-    {
       "code": 6018,
+      "name": "NoAuthorization",
+      "msg": "The invoked program returned no usable authorization"
+    },
+    {
+      "code": 6019,
+      "name": "BadAuthority",
+      "msg": "The returned seeds do not derive the program ledger's owner"
+    },
+    {
+      "code": 6020,
       "name": "OffCurveOwnerNotAllowed",
       "msg": "deposit and withdraw are wallet-only; program ledgers move value through settle"
     },
     {
-      "code": 6019,
+      "code": 6021,
       "name": "MustFundOwnLedger",
       "msg": "A wallet must fund its own ledger — only a PDA's rent may be sponsored"
     },
     {
-      "code": 6020,
+      "code": 6022,
       "name": "NotRentPayer",
       "msg": "Only the ledger's recorded rent payer may do this"
     },
     {
-      "code": 6021,
+      "code": 6023,
       "name": "LedgerExists",
       "msg": "That ledger already exists"
     },
     {
-      "code": 6022,
-      "name": "NotAReceipt",
-      "msg": "The account passed in the receipt slot is not a receipt"
+      "code": 6024,
+      "name": "AlreadySettled",
+      "msg": "This receipt has already been settled"
     },
     {
-      "code": 6023,
+      "code": 6025,
       "name": "OwnerNotWallet",
       "msg": "This instruction is for wallet ledgers — the owner must be on-curve"
     },
     {
-      "code": 6024,
+      "code": 6026,
       "name": "OwnerNotPda",
       "msg": "This instruction is for program ledgers — the owner must be a PDA"
     },
     {
-      "code": 6025,
+      "code": 6027,
       "name": "MemberProgramMismatch",
       "msg": "The seeds do not derive the owner under the claimed member program"
     },
     {
-      "code": 6026,
+      "code": 6028,
       "name": "CannotAuthorizePdaLedger",
       "msg": "A program ledger cannot carry a session key — only wallets delegate consent"
     },
     {
-      "code": 6027,
-      "name": "BadAuthorizedKey",
-      "msg": "The authorized session key must be on-curve"
-    },
-    {
-      "code": 6028,
-      "name": "NotAuthorizedToConsent",
-      "msg": "The signer is neither the debited ledger's owner nor its session key"
-    },
-    {
       "code": 6029,
-      "name": "ReceiptLive",
-      "msg": "A receipt created in this slot is still live — it may not be overwritten"
+      "name": "BadAuthorizedKey",
+      "msg": "The authorized key must be on-curve, and the authority must be set"
     },
     {
       "code": 6030,
-      "name": "ReceiptExpired",
-      "msg": "A receipt must be settled in the slot it was created in"
-    },
-    {
-      "code": 6031,
-      "name": "ReceiptNotConsumed",
-      "msg": "The last receipt at this address was never closed by the member program"
-    },
-    {
-      "code": 6032,
-      "name": "CallbackProgramMismatch",
-      "msg": "The callback program is not the member program proven into this receipt"
-    },
-    {
-      "code": 6033,
-      "name": "DuplicateLedger",
-      "msg": "A receipt names the same ledger more than once"
-    },
-    {
-      "code": 6034,
-      "name": "SlotClaimNeedsConsent",
-      "msg": "Opening a new slot on a human ledger needs the owner's or session key's consent"
+      "name": "NotAuthorizedToConsent",
+      "msg": "The signer is neither the debited ledger's owner nor its session key for this authority"
     }
   ],
   "types": [
@@ -1589,7 +1597,7 @@
     {
       "name": "Ledger",
       "docs": [
-        "[\"ledger\", owner] — one per owner, human or program. Holds claims, never value."
+        "One per owner (human or program). Holds claims, never value."
       ],
       "type": {
         "kind": "struct",
@@ -1601,8 +1609,7 @@
           {
             "name": "pda_auth",
             "docs": [
-              "true when `owner` is off-curve, i.e. a program's PDA. Set once at creation",
-              "from the owner's curve and never mutated (spec §2.5)."
+              "true when owner is off-curve (a program PDA); set once at creation."
             ],
             "type": "bool"
           },
@@ -1622,27 +1629,19 @@
           {
             "name": "rent_payer",
             "docs": [
-              "Where the rent goes when this account is closed, and the only key that may grow it.",
-              "Always the owner — the lamports may come from any signer, but they come back here."
+              "Always the owner; where rent returns on close and the only key that may grow the ledger."
             ],
             "type": "pubkey"
           },
           {
             "name": "authorized",
             "docs": [
-              "For a wallet: a session key that may consent to debits in the owner's place and end its",
-              "rollup session, or zero. Unscoped, so it spends the whole balance, but it cannot reach the",
-              "wallet — `withdraw` derives its ledger from the signer. For a PDA ledger: the member",
-              "program it belongs to, which settle checks each receipt against."
+              "Wallet: a session key that may consent to debits, or zero. PDA: the member program."
             ],
             "type": "pubkey"
           },
           {
             "name": "entries",
-            "docs": [
-              "Pre-allocated slots. `entries.len()` is the capacity; a delegated ledger",
-              "cannot realloc, so the space has to be there before the session starts."
-            ],
             "type": {
               "vec": {
                 "defined": {
@@ -1656,6 +1655,9 @@
     },
     {
       "name": "Movement",
+      "docs": [
+        "One movement; a receipt may carry several across mints."
+      ],
       "type": {
         "kind": "struct",
         "fields": [
@@ -1670,7 +1672,7 @@
           {
             "name": "from",
             "docs": [
-              "Indices into the receipt's owner list — each names one exact ledger the movement moves between."
+              "Indexes the receipt owner list."
             ],
             "type": "u8"
           },

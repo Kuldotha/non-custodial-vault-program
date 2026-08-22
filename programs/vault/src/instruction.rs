@@ -26,6 +26,10 @@ const UNDELEGATE: [u8; 8] = [131, 148, 180, 198, 91, 104, 42, 238];
 /// The delegation program's fixed callback discriminator — matched first, exactly as the
 /// `#[ephemeral]` macro used to inject a handler for it.
 const PROCESS_UNDELEGATION: [u8; 8] = [196, 28, 41, 206, 48, 37, 51, 167];
+/// Fired by the reap crank; the disc baked into every receipt at create time.
+pub const REAP_RECEIPT: [u8; 8] = [237, 1, 2, 3, 4, 5, 6, 7];
+/// Anchor's `sha256("global:reap_receipt")[..8]`, accepted as an alias so name-derived callers resolve.
+const REAP_RECEIPT_ANCHOR: [u8; 8] = [188, 144, 140, 217, 217, 136, 0, 255];
 
 pub fn dispatch(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> ProgramResult {
     if input.len() < 8 {
@@ -59,6 +63,9 @@ pub fn dispatch(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> 
         UNDELEGATE => instructions::delegation::undelegate_handler(program_id, accounts),
         PROCESS_UNDELEGATION => {
             instructions::delegation::process_undelegation_handler(program_id, accounts, data)
+        }
+        REAP_RECEIPT | REAP_RECEIPT_ANCHOR => {
+            instructions::reap_receipt::handler(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

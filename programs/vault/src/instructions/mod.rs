@@ -8,6 +8,7 @@ pub mod initialize_vault;
 pub mod open_pda_ledger;
 pub mod open_wallet_ledger;
 pub mod privacy;
+pub mod reap_receipt;
 pub mod settle;
 pub mod settle_receipt;
 pub mod withdraw;

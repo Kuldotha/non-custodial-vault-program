@@ -48,6 +48,10 @@ pub fn slot_of(data: &[u8]) -> u64 {
     u64::from_le_bytes(data[O_SLOT..O_SLOT + 8].try_into().unwrap())
 }
 
+pub fn authority_of(data: &[u8]) -> Pubkey {
+    Pubkey::new_from_array(data[O_AUTHORITY..O_AUTHORITY + 32].try_into().unwrap())
+}
+
 /// Writes a receipt's bytes exactly. `data` must be `len_for(owners.len(), movements.len(),
 /// args.len())` long.
 #[allow(clippy::too_many_arguments)]
@@ -128,11 +132,17 @@ pub fn read(data: &[u8]) -> Result<Receipt, ProgramError> {
     let mut movements = Vec::with_capacity(count);
     for i in 0..count {
         let o = mv + i * MOVEMENT_SIZE;
+        let (from, to) = (data[o + 40], data[o + 41]);
+        // Only create_receipt can place a receipt in a vault-owned account, and it bounds these —
+        // but a parser that indexes owners must not trust that from afar.
+        if from as usize >= n || to as usize >= n {
+            return Err(VaultError::NoAuthorization.into());
+        }
         movements.push(Movement {
             mint: Pubkey::new_from_array(data[o..o + 32].try_into().unwrap()),
             amount: u64::from_le_bytes(data[o + 32..o + 40].try_into().unwrap()),
-            from: data[o + 40],
-            to: data[o + 41],
+            from,
+            to,
         });
     }
     let ao = mv + count * MOVEMENT_SIZE;

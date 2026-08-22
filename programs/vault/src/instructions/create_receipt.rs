@@ -9,6 +9,8 @@ use ephemeral_rollups_sdk::ephemeral_accounts::EphemeralAccount;
 
 use crate::error::VaultError;
 use crate::state::receipt::{self, Movement, RECEIPT_HEADER};
+use crate::state::Ledger;
+use crate::utils::crank;
 use crate::utils::pda::verify_pda_owner;
 
 #[derive(BorshDeserialize)]
@@ -28,7 +30,7 @@ struct Args {
 /// debits or seeds a human it has no right to simply dies at settle.
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let args = Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
-    let [authority, consenter, receipt, ephemeral_vault, _magic_program, ..] = accounts else {
+    let [authority, authority_ledger, consenter, receipt, ephemeral_vault, magic_program, magic_context, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
     if !authority.is_signer {
@@ -67,7 +69,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let slot = Clock::get()?.slot;
 
     let (receipt_pda, bump) = Pubkey::find_program_address(
-        &[b"receipt", authority.key.as_ref(), consenter.key.as_ref()],
+        &[b"receipt", args.member_program.as_ref(), consenter.key.as_ref()],
         program_id,
     );
     if *receipt.key != receipt_pda {
@@ -87,10 +89,19 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     let len = receipt::len_for(args.owners.len(), args.movements.len(), args.args.len());
-    let bump_arr = [bump];
-    let seeds: [&[u8]; 4] = [b"receipt", authority.key.as_ref(), consenter.key.as_ref(), &bump_arr];
-    let signer_seeds: [&[&[u8]]; 1] = [&seeds];
-    let account = EphemeralAccount::new(authority, receipt, ephemeral_vault)
+    let receipt_bump = [bump];
+    let receipt_seeds: [&[u8]; 4] =
+        [b"receipt", args.member_program.as_ref(), consenter.key.as_ref(), &receipt_bump];
+
+    // On the ER a delegated ledger is vault-owned, so load_checked passes.
+    let l = Ledger::load_checked(authority_ledger, program_id)?;
+    if l.owner != *authority.key {
+        return Err(VaultError::BadAuthority.into());
+    }
+    let ledger_bump = [l.bump];
+    let ledger_seeds: [&[u8]; 3] = [b"ledger", authority.key.as_ref(), &ledger_bump];
+    let signer_seeds: [&[&[u8]]; 2] = [&ledger_seeds, &receipt_seeds];
+    let account = EphemeralAccount::new(authority_ledger, receipt, ephemeral_vault)
         .with_signer_seeds(&signer_seeds);
     if receipt.data_len() == 0 {
         account.create(len as u32)?;
@@ -109,5 +120,9 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         &args.movements,
         &args.args,
     );
-    Ok(())
+
+    crank::schedule_reap(
+        program_id, crate::instruction::REAP_RECEIPT, authority_ledger, &l.owner, l.bump,
+        magic_context, magic_program, receipt, ephemeral_vault,
+    )
 }
