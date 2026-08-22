@@ -399,7 +399,10 @@ check rejects it before anything runs.
 ### 3.9 Delegation
 
 - `delegate_ledger(validator)` — basenet. The owner signs; hands `["ledger", owner]` to the
-  delegation program. `validator = None` targets the public cluster.
+  delegation program. `validator = None` targets the public cluster. Delegation deliberately
+  does not gate on the permission's existence: the vault works just as well outside a TEE,
+  where no ACL applies, and since every creation path makes a permission, a ledger only
+  lacks one after an explicit `make_public` — the owner already chose to be readable.
 - `undelegate()` — rollup-side, **permissionless**. Ends the session; the commit is
   implicit, so there is no separate commit instruction to forget. It only writes the
   ledger's true state home — no value moves — so anyone may pay to rescue a ledger whose
