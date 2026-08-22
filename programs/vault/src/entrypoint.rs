@@ -4,7 +4,7 @@ use solana_program::{
 
 use crate::instruction;
 
-declare_id!("9vDAQgdHWCPQZabumgcuwoSLzWnRyQkSM1EHQnW8YXjs");
+declare_id!("VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV");
 
 #[cfg(not(feature = "no-entrypoint"))]
 entrypoint!(process_instruction);
