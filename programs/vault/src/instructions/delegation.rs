@@ -5,9 +5,8 @@ use solana_program::{
 };
 
 use ephemeral_rollups_sdk::cpi::{delegate_account, undelegate_account, DelegateAccounts, DelegateConfig};
-use ephemeral_rollups_sdk::ephem::commit_and_undelegate_accounts;
+use ephemeral_rollups_sdk::ephem::{FoldableIntentBuilder, MagicIntentBundleBuilder};
 
-use crate::error::VaultError;
 use crate::state::Ledger;
 
 #[derive(BorshDeserialize)]
@@ -47,21 +46,28 @@ pub fn delegate_handler(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[
 }
 
 /// Ends the session and returns the ledger to basenet. Sent to the rollup; the commit is implicit.
-/// Accounts: [payer, ledger, magic_program, magic_context]
+///
+/// `payer` funds the magic commit and must be the transaction fee payer — the rollup only lets an
+/// account be written if it is delegated or is the fee payer, and the magic program locates the
+/// payer by that identity. `authority` is who the ledger names as owner: for a wallet ledger it is
+/// the same account as `payer`; for a treasury ledger the owning program signs as `authority`
+/// (via its seeds) while the admin pays, since a treasury PDA is neither the fee payer nor, in the
+/// jackpot's case, even delegated. `fees_vault` is the magic program's ephemeral vault.
+/// Accounts: [payer, authority, ledger, magic_program, magic_context, fees_vault]
 pub fn undelegate_handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    let [payer, ledger_ai, magic_program, magic_context, ..] = accounts else {
+    let [payer, _authority, ledger_ai, magic_program, magic_context, fees_vault, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
     if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    // Nothing downstream checks who is asking — the delegation program only asks whether the
-    // account is delegated, so the authority check lives here.
-    let l = Ledger::load_checked(ledger_ai, program_id)?;
-    if !l.may_end_session(payer.key) {
-        return Err(VaultError::NotAuthorizedToConsent.into());
-    }
-    commit_and_undelegate_accounts(payer, vec![ledger_ai], magic_context, magic_program, None)
+    // Permissionless by design: undelegate only commits the ledger home (no value moves), so anyone
+    // may rescue one whose authorized key is lost. Still must be a real vault ledger; the caller pays.
+    Ledger::load_checked(ledger_ai, program_id)?;
+    MagicIntentBundleBuilder::new(payer.clone(), magic_context.clone(), magic_program.clone())
+        .magic_fee_vault(fees_vault.clone())
+        .commit_and_undelegate(&[ledger_ai.clone()])
+        .build_and_invoke()
 }
 
 #[derive(BorshDeserialize)]
