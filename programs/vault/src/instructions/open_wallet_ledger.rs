@@ -7,7 +7,7 @@ use solana_program::{
 use ephemeral_rollups_sdk::access_control::structs::Member;
 use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
-use crate::constants::MAX_SLOTS;
+use crate::constants::MAX_GROWTH;
 use crate::error::VaultError;
 use crate::utils::account::create_ledger_account_sized;
 use crate::utils::pda::{self, is_pda};
@@ -39,7 +39,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     if !ledger_ai.data_is_empty() {
         return Err(VaultError::LedgerExists.into());
     }
-    if slots == 0 || slots > MAX_SLOTS {
+    if slots == 0 || slots > MAX_GROWTH {
         return Err(VaultError::BadSlotCount.into());
     }
 
