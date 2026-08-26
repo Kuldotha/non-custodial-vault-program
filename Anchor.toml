@@ -8,6 +8,11 @@ skip-lint = false
 [programs.devnet]
 vault = "VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV"
 
+# Same id on both clusters — the vault is live on mainnet-beta too. `cluster` below stays
+# devnet so a stray `anchor deploy` cannot reach mainnet by default.
+[programs.mainnet]
+vault = "VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV"
+
 [registry]
 url = "https://api.apr.dev"
 

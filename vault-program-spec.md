@@ -54,7 +54,10 @@ hard to talk about:
 ```
 ["vault"]                 — singleton PDA. Holds all deposited SOL, and is the SPL
                             authority for every token account below.
-ATA(["vault"], mint)      — one SPL token account per mint, authority = ["vault"].
+ATA(["vault"], mint, token_program)
+                          — one token account per mint, authority = ["vault"]. The derivation
+                            includes the mint's token program, so a Token-2022 mint's reserve
+                            is a different address from a classic mint's.
 ```
 
 The vault holds every lamport and every token the program has ever taken in. Ledgers hold
@@ -229,9 +232,13 @@ reserve check, so on an unfunded vault they fail with `InsufficientReserve`.
      assert vault.lamports >= rent_exempt(0)              (§3.1)
      System transfer `amount` from signer → ["vault"]     (only the wallet can debit itself)
    else:
-     assert the reserve is the canonical ATA(["vault"], mint)
-     assert source token_account.mint == mint
-     SPL transfer `amount` from the signer's token account → the reserve
+     assert token_program is SPL Token or Token-2022
+     assert the reserve is the canonical ATA(["vault"], mint, token_program)
+     assert source token_account.mint == mint and its owner program == token_program
+     if the mint account is present at index 9:
+       TransferChecked (tag 12, decimals read off the mint) — required for Token-2022
+     else:
+       Transfer (tag 3) — the classic path
 6. entry.amount = entry.amount.checked_add(amount)?
 ```
 
@@ -253,8 +260,10 @@ owner: there are no third-party deposits.
      System transfer `amount` from ["vault"] → signer       (signed with vault seeds)
    else:
      assert tokens(mint).amount >= amount                   // physical check
-     SPL transfer from ATA(["vault"], mint) → the signer's token account, whose owner
-     field must be the signer
+     assert token_program is SPL Token or Token-2022
+     transfer from ATA(["vault"], mint, token_program) → the signer's token account, whose
+     owner field must be the signer; TransferChecked when the mint is present at index 7
+     (required for Token-2022), otherwise the classic Transfer
 ```
 
 The destination is derived from the signer, never passed. This is what makes withdrawal
@@ -391,9 +400,13 @@ recreate it, with the same membership and the same proof as at creation.
 Sweeps every balance back to the owner and closes both the ledger and its permission
 account. The rent goes to the recorded rent payer, who must sign alongside the owner.
 
-Each non-zero token entry needs its `(vault_token, owner_token)` pair in the remaining
-accounts, in entry order. The instruction asserts that **every** entry is zero before
-closing, so an incomplete account list can never strand value in the vault.
+Each non-zero token entry needs its accounts in the remaining list, in entry order: a
+`(vault_token, owner_token)` pair for a classic SPL Token entry, and a
+`(vault_token, owner_token, mint)` triple for a Token-2022 one. Each entry's token program is
+read off its own reserve account, so one close can sweep a ledger holding both kinds — provided
+every token program involved appears somewhere in the account list for the CPI. The instruction
+asserts that **every** entry is zero before closing, so an incomplete account list can never
+strand value in the vault.
 
 Basenet only: a delegated ledger is owned by the delegation program, so the ownership
 check rejects it before anything runs.
@@ -574,7 +587,13 @@ A new player therefore meets one real cost — roughly a cent of rent — and ne
 - `pda_auth` is set at creation from the owner's curve and never mutated.
 - `settle` and `settle_receipt` refuse a second human ledger *before* mutating any balance.
 - `withdraw` asserts the reserve physically covers the amount (both SOL and SPL paths).
-- Every SPL path asserts the token account is the vault's canonical ATA for the mint.
+- Every SPL path asserts the token account is the vault's canonical ATA for the mint **under the
+  token program that was passed**.
+- A Token-2022 transfer is always `TransferChecked`, with decimals read off the mint account,
+  never from a caller argument.
+- **Token-2022 mints carrying a live transfer hook are not supported** — the checked transfer
+  would need the hook's extra accounts. A dormant hook (hook program unset) transfers like any
+  other mint.
 - `initialize_vault` has been run; no SOL path accepts an unfunded vault.
 - The SOL path never reads the token-account slots; the SPL path asserts
   `token_account.mint == mint`.

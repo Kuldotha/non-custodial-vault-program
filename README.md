@@ -8,16 +8,19 @@ The problem it solves: an app wants to charge its users and pay them out, thousa
 without a basenet transaction per action and without ever holding their money. The usual answer
 is a custodial escrow account per app. This isn't that.
 
-> **Status: devnet.** Deployed at `VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV`, upgrade
-> authority **not** burned. Unaudited. Don't put real money in it.
+> **Status: live on mainnet-beta and devnet** at `VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV`,
+> the same id on both clusters; upgrade authority **not** burned on either. The two clusters are
+> currently running different binaries. Unaudited. Don't put real money in it.
 >
 > This repository is the reference for that one instance. The intent is a single live vault,
 > ultimately unowned — not a program you deploy yourself.
 
 The program is native Rust — no framework. The wire format is Anchor-compatible on purpose:
 instruction discriminators are `sha256("global:<name>")[..8]`, account layouts are byte-identical
-to their Anchor equivalents, and `vault-idl.json` describes the whole surface, so any
-Anchor-style client works unchanged.
+to their Anchor equivalents, and `vault-idl.json` describes the surface, so an
+Anchor-style client works unchanged — **with one exception: the IDL does not yet carry the
+Token-2022 wire** (it omits the trailing mint account and pins `token_program` to classic SPL
+Token). For a Token-2022 mint, build the accounts by hand as described under *Deposit*.
 
 ---
 
@@ -164,13 +167,20 @@ the owner's ATA must exist, so put `CreateIdempotent` in the same transaction:
 
 ```js
 const reserve = PublicKey.findProgramAddressSync([Buffer.from('vault')], VAULT)[0];
+const tokenProgram = /* the mint account's owner: TOKEN_PROGRAM_ID or TOKEN_2022_PROGRAM_ID */;
 
 tx.add(
-  createAssociatedTokenAccountIdempotentInstruction(payer, ataOf(reserve, mint), reserve, mint),
-  createAssociatedTokenAccountIdempotentInstruction(payer, ataOf(owner, mint), owner, mint),
+  createAssociatedTokenAccountIdempotentInstruction(
+    payer, ataOf(reserve, mint, false, tokenProgram), reserve, mint, tokenProgram),
+  createAssociatedTokenAccountIdempotentInstruction(
+    payer, ataOf(owner, mint, false, tokenProgram), owner, mint, tokenProgram),
   depositIx(owner, mint, amount),
 );
 ```
+
+The ATA derivation includes the token program, so a Token-2022 mint's reserve is a **different
+address** from a classic mint's. Pass the mint's own program everywhere, or the vault rejects the
+account with `NotCanonicalReserve` (6013).
 
 Idempotent unconditionally — it costs nothing when the account is already there and saves a
 round-trip per mint.
@@ -198,10 +208,43 @@ keys = [
 ];
 ```
 
+`token_program` is the mint's own token program — classic SPL Token or Token-2022. The vault
+accepts either and refuses anything else with `IncorrectProgramId`.
+
+**Token-2022 appends one account.** A Token-2022 transfer must be checked, and a checked transfer
+carries its mint, so the mint account goes **last, at index 9**:
+
+```js
+keys.push(ro(mint));   // required for Token-2022; optional for classic SPL Token
+```
+
+For classic SPL Token the list above is unchanged from pre-2022 clients; appending the mint there
+is legal too and simply upgrades the transfer to `TransferChecked`. A Token-2022 deposit sent
+*without* the trailing mint — or with the wrong key in that slot — fails with `MintMismatch`
+(6008) rather than moving anything.
+
+**Token-2022 mints carrying a live transfer hook are not supported**: the checked transfer would
+need the hook's own extra accounts. A dormant hook — hook program unset — transfers like any other
+mint.
+
 `withdraw` takes the same shape without the permission accounts:
-`[owner, ledger, reserve, vault_token, owner_token, token_program, system_program]`.
+`[owner, ledger, reserve, vault_token, owner_token, token_program, system_program]`, with the mint
+appended at **index 7** for a Token-2022 asset (optional for classic), by the same rule.
 
 For SOL the two token slots carry the System Program as a placeholder and are never read.
+
+### Closing a ledger
+
+`close_ledger` takes `[owner, rent_payer, ledger, vault, permission, permission_program,
+token_program, system_program]` followed by one group per non-zero token entry, **in entry order**:
+
+- classic SPL Token — `(vault_token, owner_token)`
+- Token-2022 — `(vault_token, owner_token, mint)`
+
+Each entry's token program is read off its own reserve account, so a single close sweeps a ledger
+holding both kinds — provided every token program involved appears *somewhere* in the account list
+for the CPI. The instruction asserts every entry is zero before closing, so an incomplete account
+list fails with `MissingTokenAccounts` (6012) rather than stranding value.
 
 ### A program's treasury
 

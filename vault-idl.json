@@ -61,7 +61,8 @@
     {
       "name": "close_ledger",
       "docs": [
-        "Sweeps everything back to the owner, then closes the ledger and its permission."
+        "Sweeps everything back to the owner, then closes the ledger and its permission.",
+        "Remaining accounts, one group per non-zero token entry, in entry order: (vault_token, owner_token) for a classic SPL Token entry, (vault_token, owner_token, mint) for a Token-2022 one. Every token program involved must appear somewhere in the account list for the CPI."
       ],
       "discriminator": [
         236,
@@ -137,7 +138,9 @@
         },
         {
           "name": "token_program",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          "docs": [
+            "The mint's own token program: classic SPL Token or Token-2022. Not pinned \u2014 the vault accepts either, and a Token-2022 mint's ATAs are derived under its own program."
+          ]
         },
         {
           "name": "system_program",
@@ -536,11 +539,20 @@
         },
         {
           "name": "token_program",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          "docs": [
+            "The mint's own token program: classic SPL Token or Token-2022. Not pinned \u2014 the vault accepts either, and a Token-2022 mint's ATAs are derived under its own program."
+          ]
         },
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "mint",
+          "optional": true,
+          "docs": [
+            "Required for a Token-2022 mint, whose transfer is always checked and carries its mint; optional for classic SPL Token. Must be the last account."
+          ]
         }
       ],
       "args": [
@@ -754,7 +766,7 @@
     {
       "name": "make_public",
       "docs": [
-        "Deletes a ledger's permission — the only way a ledger becomes public."
+        "Deletes a ledger's permission \u2014 the only way a ledger becomes public."
       ],
       "discriminator": [
         41,
@@ -951,7 +963,7 @@
     {
       "name": "open_wallet_ledger",
       "docs": [
-        "Wallet → vault. `mint` selects the asset; SOL_MINT moves lamports. Creates the ledger and its permission on first use."
+        "Wallet \u2192 vault. `mint` selects the asset; SOL_MINT moves lamports. Creates the ledger and its permission on first use."
       ],
       "discriminator": [
         219,
@@ -1191,7 +1203,7 @@
       "name": "settle_receipt",
       "docs": [
         "Settles a receipt. Debiting the human needs the consenter (owner or session key) to sign; credits need nobody.",
-        "Then pass the owners’ ledgers (writable, one per receipt owner) followed by the callback’s forwarded accounts."
+        "Then pass the owners\u2019 ledgers (writable, one per receipt owner) followed by the callback\u2019s forwarded accounts."
       ],
       "discriminator": [
         216,
@@ -1314,7 +1326,7 @@
     {
       "name": "withdraw",
       "docs": [
-        "Vault → wallet. The destination is derived from the signer, never passed."
+        "Vault \u2192 wallet. The destination is derived from the signer, never passed."
       ],
       "discriminator": [
         183,
@@ -1386,11 +1398,20 @@
         },
         {
           "name": "token_program",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          "docs": [
+            "The mint's own token program: classic SPL Token or Token-2022. Not pinned \u2014 the vault accepts either, and a Token-2022 mint's ATAs are derived under its own program."
+          ]
         },
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "mint",
+          "optional": true,
+          "docs": [
+            "Required for a Token-2022 mint, whose transfer is always checked and carries its mint; optional for classic SPL Token. Must be the last account."
+          ]
         }
       ],
       "args": [
@@ -1424,7 +1445,7 @@
     {
       "code": 6000,
       "name": "LedgerFull",
-      "msg": "Ledger has no free slot for this mint — grow it first"
+      "msg": "Ledger has no free slot for this mint \u2014 grow it first"
     },
     {
       "code": 6001,
@@ -1484,7 +1505,7 @@
     {
       "code": 6012,
       "name": "MissingPermission",
-      "msg": "This ledger has no permission account — create one before delegating"
+      "msg": "This ledger has no permission account \u2014 create one before delegating"
     },
     {
       "code": 6013,
@@ -1499,7 +1520,7 @@
     {
       "code": 6015,
       "name": "VaultNotInitialized",
-      "msg": "The vault is not funded to its rent floor — call initialize_vault first"
+      "msg": "The vault is not funded to its rent floor \u2014 call initialize_vault first"
     },
     {
       "code": 6016,
@@ -1529,7 +1550,7 @@
     {
       "code": 6021,
       "name": "MustFundOwnLedger",
-      "msg": "A wallet must fund its own ledger — only a PDA's rent may be sponsored"
+      "msg": "A wallet must fund its own ledger \u2014 only a PDA's rent may be sponsored"
     },
     {
       "code": 6022,
@@ -1549,12 +1570,12 @@
     {
       "code": 6025,
       "name": "OwnerNotWallet",
-      "msg": "This instruction is for wallet ledgers — the owner must be on-curve"
+      "msg": "This instruction is for wallet ledgers \u2014 the owner must be on-curve"
     },
     {
       "code": 6026,
       "name": "OwnerNotPda",
-      "msg": "This instruction is for program ledgers — the owner must be a PDA"
+      "msg": "This instruction is for program ledgers \u2014 the owner must be a PDA"
     },
     {
       "code": 6027,
@@ -1564,7 +1585,7 @@
     {
       "code": 6028,
       "name": "CannotAuthorizePdaLedger",
-      "msg": "A program ledger cannot carry a session key — only wallets delegate consent"
+      "msg": "A program ledger cannot carry a session key \u2014 only wallets delegate consent"
     },
     {
       "code": 6029,
