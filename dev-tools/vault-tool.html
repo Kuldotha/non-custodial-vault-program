@@ -27,8 +27,9 @@
 
 <div class="card">
   <div class="row">
-    <div><label>Basenet RPC (deposit / withdraw / delegate)</label><input id="rpc" placeholder="https://…" value="https://api.mainnet-beta.solana.com" /></div>
-    <div><label>Rollup RPC (undelegate — TEE endpoint, token appended by Auth TEE)</label><input id="errpc" value="https://devnet-tee.magicblock.app" /></div>
+    <div style="flex:0 0 110px"><label>Cluster</label><select id="cluster"><option value="devnet">devnet</option><option value="mainnet">mainnet</option></select></div>
+    <div><label>Basenet RPC (deposit / withdraw / delegate)</label><input id="rpc" placeholder="https://…" /></div>
+    <div><label>Rollup RPC (undelegate — TEE endpoint, token appended by Auth TEE)</label><input id="errpc" placeholder="https://…" /></div>
   </div>
   <div style="margin-top:10px">
     <button id="connect" class="alt">Connect wallet</button>
@@ -73,7 +74,12 @@ import {
 } from 'https://esm.sh/@solana/web3.js@1.98.0';
 import bs58 from 'https://esm.sh/bs58@6';
 
-const TEE_HOST = 'https://devnet-tee.magicblock.app';
+// Cluster presets drive both endpoints; the inputs stay editable for custom hosts. Auth TEE
+// reads the host from the Rollup RPC field (token stripped), so it never clobbers an edit.
+const CLUSTERS = {
+  devnet:  { rpc: 'https://rpc.magicblock.app/devnet',  tee: 'https://devnet-tee.magicblock.app'  },
+  mainnet: { rpc: 'https://rpc.magicblock.app/mainnet', tee: 'https://mainnet-tee.magicblock.app' },
+};
 
 // ── program + infra constants (verified against the vault handlers) ──
 const VAULT = new PublicKey('VAULTrDSUBZ8AXL2kGVYE8eKAn7tgWXRPAevNGUsyTV');
@@ -109,7 +115,21 @@ const sg=k=>({pubkey:k,isSigner:true,isWritable:true}), sgro=k=>({pubkey:k,isSig
 let provider, wallet;
 const log = (m,c='') => { const d=document.createElement('div'); if(c)d.className=c; d.textContent=m; $('log').prepend(d); };
 const rpc = () => new Connection($('rpc').value.trim(), 'confirmed');
-const link = sig => `https://solscan.io/tx/${sig}`;
+const link = sig => `https://solscan.io/tx/${sig}${$('cluster').value === 'devnet' ? '?cluster=devnet' : ''}`;
+const teeHost = () => $('errpc').value.trim().split('?')[0].replace(/\/+$/, '');
+
+function applyCluster(c) {
+  $('cluster').value = c;
+  $('rpc').value = CLUSTERS[c].rpc;
+  $('errpc').value = CLUSTERS[c].tee;
+  localStorage.setItem('vault-tool-cluster', c);
+}
+$('cluster').onchange = () => {
+  applyCluster($('cluster').value);
+  log(`cluster → ${$('cluster').value} (endpoints reset — re-run Auth TEE)`, 'warnc');
+  refresh();
+};
+applyCluster(localStorage.getItem('vault-tool-cluster') || 'devnet');
 
 $('asset').onchange = () => {
   const t = $('asset').value === 'token';
@@ -126,18 +146,19 @@ $('connect').onclick = async () => {
 
 // TEE auth: signed-challenge login, sets the Rollup RPC to the token'd endpoint.
 $('teeauth').onclick = guard(async () => {
+  const host = teeHost();
   const pubkey = wallet.toBase58();
-  const c = await (await fetch(`${TEE_HOST}/auth/challenge?pubkey=${pubkey}`)).json();
+  const c = await (await fetch(`${host}/auth/challenge?pubkey=${pubkey}`)).json();
   const signed = await provider.signMessage(new TextEncoder().encode(c.challenge));
   const raw = signed.signature ?? signed;
   const sig = typeof raw === 'string' ? raw : bs58.encode(raw);
-  const j = await (await fetch(`${TEE_HOST}/auth/login`, {
+  const j = await (await fetch(`${host}/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pubkey, challenge: c.challenge, signature: sig }),
   })).json();
   if (!j.token) throw new Error('TEE login failed: ' + JSON.stringify(j));
-  $('errpc').value = `${TEE_HOST}?token=${j.token}`;
-  log('TEE token acquired ✓ — Rollup RPC set','ok');
+  $('errpc').value = `${host}?token=${j.token}`;
+  log(`TEE token acquired ✓ — Rollup RPC set (${host})`,'ok');
 });
 
 function amount() {
