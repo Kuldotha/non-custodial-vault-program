@@ -6,7 +6,7 @@ use solana_system_interface::instruction as system_instruction;
 
 use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
-use crate::constants::{SOL_MINT, TOKEN_PROGRAM_ID};
+use crate::constants::{SOL_MINT, is_token_program, TOKEN_2022_PROGRAM_ID};
 use crate::error::VaultError;
 use crate::state::Ledger;
 use crate::utils::pda;
@@ -17,7 +17,9 @@ use crate::utils::spl;
 /// Sweeps every balance back to the owner, then closes the ledger and its permission. basenet only.
 /// The rent goes to whoever put it up (the recorded rent payer), not the owner.
 /// Accounts: [owner, rent_payer, ledger, vault, permission, permission_program, token_program,
-///            system_program] + (vault_token, owner_token) pairs in entry order.
+///            system_program] + (vault_token, owner_token) pairs in entry order — a Token-2022
+///            entry appends its mint after the pair, and its token program must be present in
+///            the account list (any position) for the CPI.
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let [owner, rent_payer, ledger_ai, vault, permission, permission_program, token_program, system_program, remaining @ ..] =
         accounts
@@ -27,7 +29,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     if !owner.is_signer || !rent_payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
-    if *token_program.key != TOKEN_PROGRAM_ID || *permission_program.key != PERMISSION_PROGRAM_ID {
+    if !is_token_program(token_program.key) || *permission_program.key != PERMISSION_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
@@ -58,17 +60,23 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     }
 
     // ── sweep every non-zero token entry, in entry order ─────────────────────
-    let mut pair = 0usize;
+    // Each entry's program comes off its own reserve account, so one close can sweep a ledger
+    // holding classic and Token-2022 mints alike.
+    let mut at = 0usize;
     for i in 1..l.capacity() {
         let (mint, amount) = (l.entries[i].mint, l.entries[i].amount);
         if mint == SOL_MINT || amount == 0 {
             continue;
         }
-        let vault_token = remaining.get(pair * 2).ok_or(VaultError::MissingTokenAccounts)?;
-        let owner_token = remaining.get(pair * 2 + 1).ok_or(VaultError::MissingTokenAccounts)?;
-        pair += 1;
+        let vault_token = remaining.get(at).ok_or(VaultError::MissingTokenAccounts)?;
+        let owner_token = remaining.get(at + 1).ok_or(VaultError::MissingTokenAccounts)?;
+        at += 2;
 
-        let reserve = require_reserve(vault_token, vault.key, &mint)?;
+        let entry_program = *vault_token.owner;
+        if !is_token_program(&entry_program) || owner_token.owner != vault_token.owner {
+            return Err(VaultError::MintMismatch.into());
+        }
+        let reserve = require_reserve(vault_token, vault.key, &mint, &entry_program)?;
         if reserve < amount {
             return Err(VaultError::InsufficientReserve.into());
         }
@@ -76,14 +84,22 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         if d_mint != mint || d_owner != *owner.key {
             return Err(VaultError::MintMismatch.into());
         }
-        spl::transfer(
-            token_program,
-            vault_token,
-            owner_token,
-            vault,
-            amount,
-            Some(&[b"vault", &[vault_bump]]),
-        )?;
+        let program_ai = accounts
+            .iter()
+            .find(|a| *a.key == entry_program)
+            .ok_or(ProgramError::IncorrectProgramId)?;
+        let seeds: &[&[u8]] = &[b"vault", &[vault_bump]];
+        if entry_program == TOKEN_2022_PROGRAM_ID {
+            let mint_ai = remaining.get(at).ok_or(VaultError::MissingTokenAccounts)?;
+            at += 1;
+            if *mint_ai.key != mint || *mint_ai.owner != entry_program {
+                return Err(VaultError::MintMismatch.into());
+            }
+            spl::transfer_checked(
+                program_ai, vault_token, mint_ai, owner_token, vault, amount, Some(seeds))?;
+        } else {
+            spl::transfer(program_ai, vault_token, owner_token, vault, amount, Some(seeds))?;
+        }
         l.entries[i].amount = 0;
     }
 

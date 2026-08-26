@@ -5,12 +5,12 @@ use solana_program::{
 };
 use solana_system_interface::instruction as system_instruction;
 
-use crate::constants::{SOL_MINT, TOKEN_PROGRAM_ID};
+use crate::constants::{is_token_program, SOL_MINT};
 use crate::error::VaultError;
 use crate::state::Ledger;
 use crate::utils::pda::{self, is_pda};
 use crate::utils::reserve::{require_reserve, token_fields, vault_floor};
-use crate::utils::spl;
+use crate::utils::spl::{self, trailing_mint};
 
 #[derive(BorshDeserialize)]
 struct Args {
@@ -20,6 +20,7 @@ struct Args {
 
 /// Vault → wallet, and only ever the signer's own.
 /// Accounts: [owner, ledger, vault, vault_token, owner_token, token_program, system_program]
+///           (+ the mint, appended, for a Token-2022 asset)
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let Args { mint, amount } =
         Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
@@ -34,7 +35,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     if is_pda(owner.key) {
         return Err(VaultError::OffCurveOwnerNotAllowed.into());
     }
-    if *token_program.key != TOKEN_PROGRAM_ID {
+    if !is_token_program(token_program.key) {
         return Err(ProgramError::IncorrectProgramId);
     }
     pda::validate(program_id, ledger_ai, &[b"ledger", owner.key.as_ref()])?;
@@ -59,22 +60,21 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             &[&[b"vault", &[vault_bump]]],
         )?;
     } else {
-        let reserve = require_reserve(vault_token, vault.key, &mint)?;
+        let reserve = require_reserve(vault_token, vault.key, &mint, token_program.key)?;
         if reserve < amount {
             return Err(VaultError::InsufficientReserve.into());
         }
         let (dst_mint, dst_owner, _) = token_fields(owner_token)?;
-        if dst_mint != mint || dst_owner != *owner.key {
+        if dst_mint != mint || dst_owner != *owner.key || owner_token.owner != token_program.key {
             return Err(VaultError::MintMismatch.into());
         }
-        spl::transfer(
-            token_program,
-            vault_token,
-            owner_token,
-            vault,
-            amount,
-            Some(&[b"vault", &[vault_bump]]),
-        )?;
+        let seeds: &[&[u8]] = &[b"vault", &[vault_bump]];
+        match trailing_mint(accounts, 7, &mint, token_program.key)? {
+            Some(mint_ai) => spl::transfer_checked(
+                token_program, vault_token, mint_ai, owner_token, vault, amount, Some(seeds))?,
+            None => spl::transfer(
+                token_program, vault_token, owner_token, vault, amount, Some(seeds))?,
+        }
     }
 
     l.store(ledger_ai)

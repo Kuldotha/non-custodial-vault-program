@@ -8,14 +8,14 @@ use solana_system_interface::instruction as system_instruction;
 use ephemeral_rollups_sdk::access_control::structs::Member;
 use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 
-use crate::constants::{DEFAULT_MIN_FREE, DEFAULT_SLOTS, SOL_MINT, TOKEN_PROGRAM_ID};
+use crate::constants::{is_token_program, DEFAULT_MIN_FREE, DEFAULT_SLOTS, SOL_MINT};
 use crate::error::VaultError;
 use crate::state::Ledger;
 use crate::utils::account::{create_ledger_account, ensure_headroom};
 use crate::utils::pda::{self, is_pda};
 use crate::utils::permission;
 use crate::utils::reserve::{require_reserve, token_fields, vault_floor};
-use crate::utils::spl;
+use crate::utils::spl::{self, trailing_mint};
 
 #[derive(BorshDeserialize)]
 struct Args {
@@ -28,7 +28,8 @@ struct Args {
 /// Wallet → vault. `mint` selects the asset; `SOL_MINT` moves lamports. Creates the ledger and
 /// its permission on first use, and tops up the free-slot band.
 /// Accounts: [owner, ledger, permission, permission_program, vault, vault_token, owner_token,
-///            token_program, system_program]
+///            token_program, system_program] (+ the mint, appended, for a Token-2022 asset —
+///            its transfer must be checked, and checked transfers carry the mint)
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let Args { mint, amount, min_free, slot_increase } =
         Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
@@ -44,7 +45,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     if is_pda(owner.key) {
         return Err(VaultError::OffCurveOwnerNotAllowed.into());
     }
-    if *permission_program.key != PERMISSION_PROGRAM_ID || *token_program.key != TOKEN_PROGRAM_ID {
+    if *permission_program.key != PERMISSION_PROGRAM_ID || !is_token_program(token_program.key) {
         return Err(ProgramError::IncorrectProgramId);
     }
 
@@ -91,12 +92,16 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             &[owner.clone(), vault.clone(), system_program.clone()],
         )?;
     } else {
-        require_reserve(vault_token, vault.key, &mint)?;
+        require_reserve(vault_token, vault.key, &mint, token_program.key)?;
         let (src_mint, _, _) = token_fields(owner_token)?;
-        if src_mint != mint {
+        if src_mint != mint || owner_token.owner != token_program.key {
             return Err(VaultError::MintMismatch.into());
         }
-        spl::transfer(token_program, owner_token, vault_token, owner, amount, None)?;
+        match trailing_mint(accounts, 9, &mint, token_program.key)? {
+            Some(mint_ai) => spl::transfer_checked(
+                token_program, owner_token, mint_ai, vault_token, owner, amount, None)?,
+            None => spl::transfer(token_program, owner_token, vault_token, owner, amount, None)?,
+        }
     }
 
     l.credit(index, amount)?;

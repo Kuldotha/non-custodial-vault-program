@@ -2,6 +2,14 @@ use solana_program::{pubkey::Pubkey, pubkey};
 
 /// The SPL Token program.
 pub const TOKEN_PROGRAM_ID: Pubkey = pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+pub const TOKEN_2022_PROGRAM_ID: Pubkey = pubkey!("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+/// Both token programs the vault moves value through. Token-2022 mints with a live transfer
+/// hook are NOT supported — the checked transfer would need the hook's extra accounts — but a
+/// dormant hook (program unset, e.g. PUMP today) transfers like any other mint.
+pub fn is_token_program(key: &Pubkey) -> bool {
+    *key == TOKEN_PROGRAM_ID || *key == TOKEN_2022_PROGRAM_ID
+}
 
 /// The SPL Associated Token Account program — reserves are the vault's ATA per mint.
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey =
