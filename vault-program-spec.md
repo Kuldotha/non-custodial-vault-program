@@ -98,7 +98,7 @@ pub struct Ledger {
     pub bump:       u8,         //  1
     // 6 bytes padding
     pub rent_payer: Pubkey,     // 32 — where rent returns on close; the only key that may grow it
-    pub authorized: Pubkey,     // 32 — wallet: a session key or zero; PDA: the member program
+    pub authorized: Pubkey,     // 32 — PDA: the member program; wallet: unused, zero (§3.5)
     pub entries:    Vec<Entry>, //  4 + 40 × capacity
 }
 ```
@@ -120,10 +120,10 @@ someone's rent would otherwise be a way to hand them money — the rent comes ba
 owner at close), while a PDA cannot pay, so its sponsor becomes the rent payer and the rent
 returns to them. Only the rent payer may fund growth.
 
-**The authorized key** is the ledger's second identity. On a wallet ledger it is a session
-key — assignable and revocable by the owner — that may consent to the ledger's debits. On a
-PDA ledger it is the member program, set at open, and binds the ledger to that program at
-receipt settlement.
+**The authorized key** is a PDA ledger's second identity: the member program, set at open,
+which binds the ledger to that program at receipt settlement. On a wallet ledger it is unused
+and zero — a wallet's session keys live in its session store (§3.5), not in the ledger, so
+that granting or replacing one never needs the delegated ledger to come home.
 
 ### 2.3 Slot 0 is SOL
 
@@ -188,7 +188,8 @@ this — delegation and reassignment rewrite it.
 | `open_wallet_ledger` | basenet | a wallet, for itself |
 | `open_pda_ledger` | basenet | a program (its PDA signs) plus a sponsor |
 | `grow_pda_ledger` | basenet | a program plus its recorded rent payer |
-| `assign_ledger_authorization` | basenet | a wallet, for its own ledger |
+| `authorize_session` | basenet | a wallet, for its own store |
+| `revoke_session` | basenet | a wallet, for its own store |
 | `make_public` / `make_wallet_ledger_private` / `make_pda_ledger_private` | basenet | the owner (plus rent payer where rent moves) |
 | `deposit` | basenet | a wallet, for its own ledger |
 | `withdraw` | basenet | the ledger owner |
@@ -224,7 +225,8 @@ reserve check, so on an unfunded vault they fail with `InsufficientReserve`.
    signer: a program's ledger moves value only through settle.
 2. If uninitialised, create the ledger: DEFAULT_SLOTS entries, slot 0 SOL, pda_auth from
    the owner's curve, rent payer = owner.
-3. If the permission account is empty, create it (§3.7).
+3. If the permission account is empty, create it (§3.7). If the session store is empty,
+   create it too (§3.5) — one signature stands up all three.
 4. ensure_headroom(min_free, slot_increase)   — before the claim, not after: a deposit of
    a new mint into a full ledger would otherwise fail on the very growth it is about to
    perform (§3.6).
@@ -330,16 +332,59 @@ This is unavoidable at the primitive level and is correct: Alice deployed it, Al
 operates it, the obligations are hers. What matters is that **this program cannot be used
 as a payment rail directly** — anyone who wants one must publish their own.
 
-### 3.5 Session keys — `assign_ledger_authorization(authorized)`
+### 3.5 Session keys — the session store
 
-A wallet owner stores a second key on their ledger: a **session key**, held by the client,
-allowed to consent to that ledger's debits in `settle` and `settle_receipt`. Gameplay then
-never needs the wallet itself to sign — the wallet delegates consent for a session and
-revokes it (by assigning the zero key) when done. An off-curve session key is refused, and
-a PDA ledger cannot be assigned one at all: its `authorized` is the member program, fixed
-at `open_pda_ledger`, and means something different (§3.10).
+A **session key** is an ephemeral keypair a game's client mints and holds, allowed to consent
+to the wallet's ledger debits in `settle` and `settle_receipt`, so gameplay never needs the
+wallet itself to sign. A wallet's keys live in its **session store**:
 
-basenet only; the owner signs.
+```rust
+pub struct Entry {
+    pub program:    Pubkey,      // 32 — the game the keys were minted for
+    pub temporary:  Pubkey,      // 32 — a key the client will not keep, or zero
+    pub expires_at: i64,         //  8 — when the temporary key dies
+    pub ring:       [Pubkey; 5], // 160 — persisted keys, oldest first
+}                                // 232 bytes
+
+pub struct Session {
+    pub owner:   Pubkey,         // 32
+    pub bump:    u8,             //  1
+    // 3 bytes padding
+    pub entries: Vec<Entry>,     //  4 + 232 per program
+}                                // 48 bytes empty, behind the 8-byte discriminator
+```
+
+`["session", owner]`, created empty beside the ledger by the same `deposit` or
+`open_wallet_ledger` (one signature stands up the ledger, its permission and its store),
+closed with it by `close_ledger`, and **never delegated**. One entry per program: a game
+mints its own key and never shares it, so a key consents for the one program it was minted
+for. The first grant for a program adds its entry, the account growing by 232 bytes on
+basenet with the owner paying the rent — two games fit in 512 bytes; revoking the program
+drops the entry and refunds it.
+
+**`authorize_session(program, key, expires_at)`** — basenet only; the owner signs, and pays
+when the program is new to the store. With `expires_at` zero the key goes into the program's
+ring: five persisted keys, a sixth pushing out the oldest, a key already held left where it
+is. With any other value the key takes the program's temporary slot — a session the client
+does not keep, on a shared machine say — overwritten by the next such grant and dead on its
+own once that unix second has passed; an expiry already past is refused. Nobody manages the
+keys: a client asks for its key once, a device whose key was pushed out asks again. An
+off-curve or zero key is refused.
+
+**`revoke_session(program, key)`** — basenet only; the owner signs. Forgets `key` within the
+program's entry, the ring closing up; the zero key drops the entry whole, the program's
+access with it, and refunds its rent to the owner.
+
+Because the store is never delegated, a rollup reads it as a read-only clone of the basenet
+account, refreshed whenever a transaction touches it. A key granted on basenet — an ordinary
+wallet signature, seconds — therefore consents on the rollup at once, and a key a client has
+lost is replaced without the ledger ever coming home. `settle_receipt` takes the store
+directly after the receipt's ledgers whenever one of them is a wallet's (§3.10); `settle`
+takes it as an optional fifth account when a session key consents to a new slot. A wallet
+whose ledger predates the store has no session keys until its first `authorize_session`,
+which creates the store on the spot, owner-funded — re-authorising after the upgrade is that
+one signature. A PDA ledger has no store: its `authorized` is the member program, fixed at
+`open_pda_ledger`, and means something different (§3.10).
 
 ### 3.6 Growth
 
@@ -397,8 +442,10 @@ recreate it, with the same membership and the same proof as at creation.
 
 ### 3.8 `close_ledger()`
 
-Sweeps every balance back to the owner and closes both the ledger and its permission
-account. The rent goes to the recorded rent payer, who must sign alongside the owner.
+Sweeps every balance back to the owner and closes the ledger, its permission account and,
+for a wallet, its session store (§3.5), passed right after the system program; for a
+program's ledger that slot is ignored. The ledger's rent goes to the recorded rent payer,
+who must sign alongside the owner; the store's rent goes to the owner, who funded it.
 
 Each non-zero token entry needs its accounts in the remaining list, in entry order: a
 `(vault_token, owner_token)` pair for a classic SPL Token entry, and a
@@ -467,9 +514,11 @@ why consent lives at settle rather than creation. Checks, in order:
    cannot move another program's treasury.
 5. At most one ledger is human, whatever the shape of the receipt.
 6. If the human ledger is debited, or gains a new mint slot, the consenter must be its
-   owner or its session key. A receipt that only credits existing entries took nothing and
-   needs no relationship to the human at all — which is what lets a payout be executed for
-   a player who has closed the app.
+   owner or one of the keys in its session store granted for the receipt's member program
+   (§3.5). The store is the account right after the ledgers whenever one of them is a
+   wallet's; an empty one means no keys. A receipt that only credits existing entries took
+   nothing and needs no relationship to the human at all — which is what lets a payout be
+   executed for a player who has closed the app.
 7. The movements are applied — checked arithmetic, slots claimed and released as in
    `settle`.
 8. The receipt's discriminator is zeroed, so it cannot be re-settled during the callback.

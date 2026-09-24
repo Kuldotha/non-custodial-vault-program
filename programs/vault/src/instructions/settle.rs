@@ -5,6 +5,7 @@ use solana_program::{
 };
 
 use crate::error::VaultError;
+use crate::instructions::session;
 use crate::state::Ledger;
 
 #[derive(BorshDeserialize)]
@@ -14,11 +15,12 @@ struct Args {
 }
 
 /// Moves value between two ledgers — pure bookkeeping, the reserves are untouched.
-/// Accounts: [src, dst, src_authority, dst_consenter]
+/// Accounts: [src, dst, src_authority, dst_consenter] (+ the human's session store, when a
+///            session key consents to a new slot on their ledger)
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let Args { mint, amount } =
         Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
-    let [src, dst, src_authority, dst_consenter, ..] = accounts else {
+    let [src, dst, src_authority, dst_consenter, rest @ ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
@@ -54,8 +56,13 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         if !dst_consenter.is_signer {
             return Err(VaultError::MissingUserSignature.into());
         }
+        // The owner, or a session key of theirs for the paying program — the debited side is
+        // a program's ledger here, and its `authorized` names that program.
         let allowed = *dst_consenter.key == dst_l.owner
-            || (dst_l.authorized != Pubkey::default() && dst_l.authorized == *dst_consenter.key);
+            || match rest {
+                [session, ..] => session::may_consent(program_id, session, &dst_l.owner, dst_consenter.key, &src_l.authorized)?,
+                [] => false,
+            };
         if !allowed {
             return Err(VaultError::NotAuthorizedToConsent.into());
         }

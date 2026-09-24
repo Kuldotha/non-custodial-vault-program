@@ -36,7 +36,7 @@ offset  size  field
     41     1  bump
     42     6  padding
     48    32  rent_payer    (where rent returns on close; the only key that may grow it)
-    80    32  authorized    (wallet: a session key or zero; PDA: the member program)
+    80    32  authorized    (PDA: the member program; wallet: unused, zero)
    112     4  capacity
    116    40  entry[0]      slot 0 is always SOL
    156    40  entry[1]
@@ -98,11 +98,12 @@ merges them removes one silently.
 | `open_wallet_ledger` | basenet | owner | an empty wallet ledger at a chosen size (max 256 slots per open), permission `[owner]` |
 | `open_pda_ledger` | basenet | owner + payer | a program's ledger, sponsor-funded; the member program proven from the owner's seeds |
 | `grow_pda_ledger` | basenet | owner + rent payer | adds slots to a program's ledger; wallets grow through `deposit` |
-| `assign_ledger_authorization` | basenet | owner | sets a wallet ledger's session key; the zero key revokes |
+| `authorize_session` | basenet | owner | lets a game's session key consent for that game: into the game's ring of five, or its temporary slot with an expiry; the first for a game adds its entry |
+| `revoke_session` | basenet | owner | forgets one of a game's session keys; the zero key drops the game's entry and refunds its rent |
 | `make_public` | basenet | owner + rent payer | deletes the ledger's permission — privacy explicitly given up |
 | `make_wallet_ledger_private` | basenet | owner | recreates a wallet ledger's permission, naming the owner |
 | `make_pda_ledger_private` | basenet | owner + rent payer | recreates a program ledger's permission, with the same proof |
-| `deposit` | basenet | owner | wallet → ledger, wallets only; creates the ledger and its permission on first use |
+| `deposit` | basenet | owner | wallet → ledger, wallets only; creates the ledger, its permission and its session store on first use |
 | `withdraw` | basenet | owner | ledger → the owner's wallet, wallets only |
 | `settle` | either | the debited side; the credited human too, for a new mint slot | moves a balance between two ledgers, never two humans |
 | `create_receipt` | rollup | member PDA + session key | writes agreed movements to an ephemeral account; schedules the reap |
@@ -110,7 +111,7 @@ merges them removes one silently.
 | `reap_receipt` | rollup | nobody — a scheduled crank | closes an orphaned receipt, returning its rent to the sponsor ledger |
 | `delegate_ledger` | basenet | owner + payer | hands the ledger to a rollup validator |
 | `undelegate` | rollup | any payer | commits the ledger back to basenet; permissionless |
-| `close_ledger` | basenet | owner + rent payer | sweeps everything out, closes the permission, refunds the rent |
+| `close_ledger` | basenet | owner + rent payer | sweeps everything out, closes the permission and the session store, refunds the rent |
 
 A wallet ledger's rent payer is its owner; a PDA ledger's is whoever sponsored the open. The
 delegation program's fixed-discriminator undelegation callback is also handled, but is not part
@@ -137,17 +138,40 @@ change when the session ends, never the states in between.
 
 ### Session keys
 
-`assign_ledger_authorization` stores a second key — `authorized` — on a wallet ledger. It is a
-session key: an ephemeral keypair the player's client holds, allowed to consent to that ledger's
-debits in `settle` and `settle_receipt` so gameplay never needs the wallet itself to sign.
-Assigning the zero key revokes it; an off-curve key is refused. A PDA ledger cannot be assigned
-one — its `authorized` is the member program, fixed at `open_pda_ledger`, and is what binds the
-ledger to that program at receipt settlement.
+A session key is an ephemeral keypair a game's client mints and holds, allowed to consent to the
+wallet's ledger debits in `settle` and `settle_receipt` so gameplay never needs the wallet itself
+to sign. They live in the wallet's **session store**, `["session", owner]`, created empty beside
+the ledger by the same `deposit` or `open_wallet_ledger` — one signature stands up the ledger,
+its permission and its store — and never delegated.
+
+The store is an array of **program entries**, one per game: the program, a temporary key with
+its expiry, and a ring of five persisted keys. A game mints its own key and never shares it, so a
+key consents for the one program it was minted for. The first `authorize_session` for a program
+adds its entry, 232 bytes, the owner paying the rent — about 0.002 SOL per game, refunded when
+the program's access is revoked. With an expiry of zero the key goes into the program's ring; a
+sixth key pushes out the oldest, and a device whose key was pushed out simply asks again. Any
+other expiry puts the key in the program's temporary slot — a session the client does not keep,
+on a shared machine say — overwritten by the next such session and dead on its own at that unix
+second. Nobody manages the keys; `revoke_session` forgets one key within a program, or with the
+zero key drops the program's entry whole. An off-curve or zero key is refused.
+
+Because the store is never delegated, the rollup reads it as a read-only clone of the basenet
+account, refreshed whenever a transaction touches it: a key granted on basenet — an ordinary
+wallet signature, seconds — consents on the rollup at once, and a lost key is replaced without
+the ledger ever coming home. `settle_receipt` takes the store right after the receipt's
+ledgers; `settle` takes it as a fifth account when a session key consents to a new slot. A
+wallet whose ledger predates the store has no session keys until its first
+`authorize_session`, which creates the store on the spot.
+
+A PDA ledger has no store — its `authorized` is the member program, fixed at `open_pda_ledger`,
+and is what binds the ledger to that program at receipt settlement. A wallet ledger's
+`authorized` is unused and zero; the field stays for the layout.
 
 ### PDAs
 
 ```
 ledger           ["ledger", owner]                        this program
+session          ["session", owner]                       this program (wallets; never delegated)
 reserve          ["vault"]                                this program
 vault authority  []                                       this program (signs the receipt callback)
 receipt          ["receipt", member_program, consenter]   this program (ephemeral)

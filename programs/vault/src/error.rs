@@ -42,6 +42,8 @@ pub enum VaultError {
     CallbackProgramMismatch,
     DuplicateLedger,
     SlotClaimNeedsConsent,
+    /// A temporary session key with an expiry already past.
+    BadExpiry,
 }
 
 impl From<VaultError> for ProgramError {

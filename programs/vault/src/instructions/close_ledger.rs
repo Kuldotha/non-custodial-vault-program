@@ -14,14 +14,16 @@ use crate::utils::permission;
 use crate::utils::reserve::{require_reserve, token_fields, vault_floor};
 use crate::utils::spl;
 
-/// Sweeps every balance back to the owner, then closes the ledger and its permission. basenet only.
-/// The rent goes to whoever put it up (the recorded rent payer), not the owner.
+/// Sweeps every balance back to the owner, then closes the ledger, its permission and, for a
+/// wallet, its session store. basenet only. The rent goes to whoever put it up (the recorded
+/// rent payer), not the owner; the store's rent goes to the owner, who funded it.
 /// Accounts: [owner, rent_payer, ledger, vault, permission, permission_program, token_program,
-///            system_program] + (vault_token, owner_token) pairs in entry order — a Token-2022
-///            entry appends its mint after the pair, and its token program must be present in
-///            the account list (any position) for the CPI.
+///            system_program, session] + (vault_token, owner_token) pairs in entry order — a
+///            Token-2022 entry appends its mint after the pair, and its token program must be
+///            present in the account list (any position) for the CPI. `session` is the wallet's
+///            store; for a program's ledger the slot is ignored.
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
-    let [owner, rent_payer, ledger_ai, vault, permission, permission_program, token_program, system_program, remaining @ ..] =
+    let [owner, rent_payer, ledger_ai, vault, permission, permission_program, token_program, system_program, session, remaining @ ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -108,7 +110,11 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         return Err(VaultError::MissingTokenAccounts.into());
     }
 
-    // Close the permission (skip if a pre-permission ledger has none), then the ledger account.
+    // The permission first (skip if a pre-permission ledger has none): it is a CPI, and the
+    // runtime checks the caller's balance at a CPI boundary over the accounts the CPI names.
+    // A store closed before it would have credited the owner without the store, which the CPI
+    // never sees, having been debited in the runtime's view — and the close would be refused as
+    // unbalanced. So every direct lamport move comes after the last CPI.
     if !permission.data_is_empty() {
         permission::close(
             permission_program,
@@ -118,5 +124,17 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
             &[b"ledger", owner.key.as_ref(), &[ledger_bump]],
         )?;
     }
+
+    // The wallet's session store goes with the ledger (skip if a pre-store ledger has none).
+    if !l.pda_auth {
+        pda::validate(program_id, session, &[b"session", owner.key.as_ref()])?;
+        if !session.data_is_empty() {
+            if session.owner != program_id {
+                return Err(ProgramError::IllegalOwner);
+            }
+            pda::close(owner, session)?;
+        }
+    }
+
     pda::close(rent_payer, ledger_ai)
 }

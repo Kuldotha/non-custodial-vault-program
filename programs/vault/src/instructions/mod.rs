@@ -1,4 +1,3 @@
-pub mod authorize;
 pub mod close_ledger;
 pub mod create_receipt;
 pub mod delegation;
@@ -9,6 +8,7 @@ pub mod open_pda_ledger;
 pub mod open_wallet_ledger;
 pub mod privacy;
 pub mod reap_receipt;
+pub mod session;
 pub mod settle;
 pub mod settle_receipt;
 pub mod withdraw;

@@ -34,7 +34,8 @@ pub struct Ledger {
     /// Where the rent goes on close, and the only key that may grow it — the owner for a wallet
     /// ledger, the sponsor for a PDA's.
     pub rent_payer: Pubkey,
-    /// Wallet: a session key that may consent to debits, or zero. PDA: the member program.
+    /// PDA: the member program, fixed at open. Wallet: unused, always zero — a wallet's session
+    /// keys live in its `["session", owner]` store. The field stays for the layout.
     pub authorized: Pubkey,
     /// Pre-allocated slots; `entries.len()` is the capacity.
     pub entries: Vec<Entry>,
@@ -67,12 +68,6 @@ impl Ledger {
             .enumerate()
             .filter(|(i, e)| *i != 0 && e.mint == SOL_MINT)
             .count()
-    }
-
-    /// Whether `who` may end this ledger's rollup session.
-    pub fn may_end_session(&self, who: &Pubkey) -> bool {
-        *who == self.owner
-            || (!self.pda_auth && self.authorized != Pubkey::default() && *who == self.authorized)
     }
 
     /// Index of the entry for `mint`, or None. SOL is positional — never a scan.

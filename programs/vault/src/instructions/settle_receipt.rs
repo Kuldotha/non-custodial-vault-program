@@ -13,6 +13,7 @@ use ephemeral_rollups_sdk::consts::EPHEMERAL_VAULT_ID;
 use ephemeral_rollups_sdk::ephemeral_accounts::EphemeralAccount;
 
 use crate::error::VaultError;
+use crate::instructions::session;
 use crate::state::{receipt, Ledger};
 use crate::utils::crank;
 
@@ -55,7 +56,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
     if remaining.len() < ledger_count {
         return Err(VaultError::NoAuthorization.into());
     }
-    let (ledger_infos, forwarded) = remaining.split_at(ledger_count);
+    let (ledger_infos, after_ledgers) = remaining.split_at(ledger_count);
 
     // Off-enum codes: 7000 + check*100 + index.
     let code = |c: u32, idx: usize| -> ProgramError { ProgramError::Custom(7000 + c * 100 + idx as u32) };
@@ -89,22 +90,30 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], _data: &[u8]) -> P
         return Err(VaultError::NotProgramMediated.into());
     }
 
-    // The one human ledger must have its owner or session key sign whenever it is debited or gets a
-    // new token slot. Program ledgers are already covered by `authorized == member` above.
-    if let Some(hi) = ledgers.iter().position(|l| !l.pda_auth) {
-        let debited = r.movements.iter().any(|m| m.from as usize == hi);
-        let new_slot = r
-            .movements
-            .iter()
-            .any(|m| m.to as usize == hi && ledgers[hi].index_of(&m.mint).is_none());
-        if debited || new_slot {
-            // The consenter already signed (checked above); here it must be this ledger's party.
-            let ok = *consenter.key == ledgers[hi].owner || *consenter.key == ledgers[hi].authorized;
-            if !ok {
-                return Err(VaultError::NotAuthorizedToConsent.into());
+    // The one human ledger must have its owner or one of their session keys for this program
+    // sign whenever it is debited or gets a new token slot. Its session store follows the
+    // ledgers in the account list; a receipt with no human ledger has no such slot. Program
+    // ledgers are already covered by `authorized == member` above.
+    let forwarded = match ledgers.iter().position(|l| !l.pda_auth) {
+        Some(hi) => {
+            let [session, forwarded @ ..] = after_ledgers else {
+                return Err(VaultError::NoAuthorization.into());
+            };
+            let debited = r.movements.iter().any(|m| m.from as usize == hi);
+            let new_slot = r
+                .movements
+                .iter()
+                .any(|m| m.to as usize == hi && ledgers[hi].index_of(&m.mint).is_none());
+            if debited || new_slot {
+                // The consenter already signed (checked above); here it must be this ledger's party.
+                if !session::may_consent(program_id, session, &ledgers[hi].owner, consenter.key, &r.member)? {
+                    return Err(VaultError::NotAuthorizedToConsent.into());
+                }
             }
+            forwarded
         }
-    }
+        None => after_ledgers,
+    };
 
     for m in &r.movements {
         let (f, t) = (m.from as usize, m.to as usize);

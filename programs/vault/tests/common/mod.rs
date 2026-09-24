@@ -12,10 +12,12 @@ use mollusk_svm::Mollusk;
 use solana_account::Account;
 use solana_program::{pubkey::Pubkey, rent::Rent};
 
-use vault::state::{Entry, Ledger};
+use vault::state::{Entry, Ledger, Session};
 
 // Anchor `sha256("global:<name>")[..8]` — the wire discriminators approach A preserves.
 pub const SETTLE_DISC: [u8; 8] = [175, 42, 185, 87, 144, 131, 102, 212];
+pub const AUTHORIZE_SESSION_DISC: [u8; 8] = [187, 218, 251, 161, 99, 40, 34, 34];
+pub const REVOKE_SESSION_DISC: [u8; 8] = [86, 92, 198, 120, 144, 2, 7, 194];
 
 pub fn mollusk() -> Mollusk {
     Mollusk::new(&vault::ID, "vault")
@@ -56,6 +58,31 @@ pub fn read_ledger(account: &Account) -> Ledger {
     Ledger::read_from(&account.data).unwrap()
 }
 
+pub fn session_pda(owner: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[b"session", owner.as_ref()], &vault::ID)
+}
+
+/// A wallet's session store at its canonical PDA, holding whatever `set` grants, sized to it.
+pub fn make_session(owner: &Pubkey, set: impl FnOnce(&mut Session)) -> (Pubkey, Account) {
+    let (pda, bump) = session_pda(owner);
+    let mut s = Session::new(*owner, bump);
+    set(&mut s);
+    let mut data = vec![0u8; Session::space(s.entries.len())];
+    s.write_to(&mut data).unwrap();
+    let account = Account {
+        lamports: Rent::default().minimum_balance(data.len()),
+        data,
+        owner: vault::ID,
+        executable: false,
+        rent_epoch: 0,
+    };
+    (pda, account)
+}
+
+pub fn read_session(account: &Account) -> Session {
+    Session::read_from(&account.data).unwrap()
+}
+
 /// A funded System-owned account — a signer stand-in or a placeholder.
 pub fn system_account() -> Account {
     Account {
@@ -73,4 +100,18 @@ pub fn set_entry(l: &mut Ledger, index: usize, mint: Pubkey, amount: u64) {
 
 pub fn token_mint(n: u8) -> Pubkey {
     Pubkey::new_from_array([n; 32])
+}
+
+/// A key a human could hold: on the curve, which random bytes are only half the time. The
+/// vault refuses an off-curve session key, so a test's keys have to pass that check.
+pub fn wallet_key(n: u8) -> Pubkey {
+    let mut bytes = [n; 32];
+    for i in 0u8..=255 {
+        bytes[31] = i;
+        let key = Pubkey::new_from_array(bytes);
+        if !vault::utils::pda::is_pda(&key) {
+            return key;
+        }
+    }
+    panic!("no on-curve key from {n}");
 }

@@ -11,7 +11,7 @@ use ephemeral_rollups_sdk::consts::PERMISSION_PROGRAM_ID;
 use crate::constants::{is_token_program, DEFAULT_MIN_FREE, DEFAULT_SLOTS, SOL_MINT};
 use crate::error::VaultError;
 use crate::state::Ledger;
-use crate::utils::account::{create_ledger_account, ensure_headroom};
+use crate::utils::account::{create_ledger_account, create_session_account, ensure_headroom};
 use crate::utils::pda::{self, is_pda};
 use crate::utils::permission;
 use crate::utils::reserve::{require_reserve, token_fields, vault_floor};
@@ -25,15 +25,16 @@ struct Args {
     slot_increase: Option<u16>,
 }
 
-/// Wallet → vault. `mint` selects the asset; `SOL_MINT` moves lamports. Creates the ledger and
-/// its permission on first use, and tops up the free-slot band.
+/// Wallet → vault. `mint` selects the asset; `SOL_MINT` moves lamports. Creates the ledger, its
+/// permission and its session store on first use — one signature stands the whole account up —
+/// and tops up the free-slot band.
 /// Accounts: [owner, ledger, permission, permission_program, vault, vault_token, owner_token,
-///            token_program, system_program] (+ the mint, appended, for a Token-2022 asset —
-///            its transfer must be checked, and checked transfers carry the mint)
+///            token_program, system_program, session] (+ the mint, appended, for a Token-2022
+///            asset — its transfer must be checked, and checked transfers carry the mint)
 pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let Args { mint, amount, min_free, slot_increase } =
         Args::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
-    let [owner, ledger_ai, permission, permission_program, vault, vault_token, owner_token, token_program, system_program, ..] =
+    let [owner, ledger_ai, permission, permission_program, vault, vault_token, owner_token, token_program, system_program, session, ..] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -77,6 +78,12 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         )?;
     }
 
+    // The session store too, on first use and for a ledger that predates it.
+    let session_bump = pda::validate(program_id, session, &[b"session", owner.key.as_ref()])?;
+    if session.data_is_empty() {
+        create_session_account(session, owner, system_program, session_bump)?;
+    }
+
     // Before the claim, not after: a deposit of a new mint into a full ledger would otherwise fail
     // on the very growth this call is about to perform.
     ensure_headroom(ledger_ai, &mut l, owner, system_program, min_free, slot_increase)?;
@@ -97,7 +104,7 @@ pub fn handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         if src_mint != mint || owner_token.owner != token_program.key {
             return Err(VaultError::MintMismatch.into());
         }
-        match trailing_mint(accounts, 9, &mint, token_program.key)? {
+        match trailing_mint(accounts, 10, &mint, token_program.key)? {
             Some(mint_ai) => spl::transfer_checked(
                 token_program, owner_token, mint_ai, vault_token, owner, amount, None)?,
             None => spl::transfer(token_program, owner_token, vault_token, owner, amount, None)?,

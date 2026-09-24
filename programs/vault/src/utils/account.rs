@@ -8,7 +8,7 @@ use solana_system_interface::instruction as system_instruction;
 
 use crate::constants::{DEFAULT_SLOTS, MAX_SLOT_INCREASE};
 use crate::error::VaultError;
-use crate::state::{Entry, Ledger};
+use crate::state::{Entry, Ledger, Session};
 use crate::utils::pda::is_pda;
 
 /// Creates `["ledger", owner]` — a program-owned account sized for `slots`. The rent may come from
@@ -58,6 +58,43 @@ pub fn create_ledger_account_sized<'a>(
     )?;
 
     Ok(Ledger::new(*owner.key, is_pda(owner.key), bump, rent_payer, slots))
+}
+
+/// Creates `["session", owner]` beside a wallet's ledger, empty, owner-funded, the same way and
+/// for the same reason: a pre-funded address must not be able to block it. It grows by one
+/// program entry per game the owner authorises.
+pub fn create_session_account<'a>(
+    info: &AccountInfo<'a>,
+    owner: &AccountInfo<'a>,
+    system_program: &AccountInfo<'a>,
+    bump: u8,
+) -> Result<Session, ProgramError> {
+    let space = Session::space(0);
+    let rent = Rent::get()?.minimum_balance(space);
+    let owner_key = *owner.key;
+    let bump_arr = [bump];
+    let signer_seeds: &[&[u8]] = &[b"session", owner_key.as_ref(), &bump_arr];
+
+    let have = info.lamports();
+    if have < rent {
+        invoke(
+            &system_instruction::transfer(owner.key, info.key, rent - have),
+            &[owner.clone(), info.clone(), system_program.clone()],
+        )?;
+    }
+    invoke_signed(
+        &system_instruction::allocate(info.key, space as u64),
+        &[info.clone(), system_program.clone()],
+        &[signer_seeds],
+    )?;
+    invoke_signed(
+        &system_instruction::assign(info.key, &crate::ID),
+        &[info.clone(), system_program.clone()],
+        &[signer_seeds],
+    )?;
+    let s = Session::new(owner_key, bump);
+    s.write_to(&mut info.try_borrow_mut_data()?)?;
+    Ok(s)
 }
 
 /// The wallet path — owner funds its own ledger at the default size.

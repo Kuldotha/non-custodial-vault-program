@@ -8,35 +8,38 @@
   },
   "instructions": [
     {
-      "name": "assign_ledger_authorization",
+      "name": "authorize_session",
       "docs": [
-        "basenet only; the owner signs. An all-zero key revokes."
+        "Lets `key` consent for `program` on the owner's ledger. basenet only; the owner signs.",
+        "The first grant for a program adds its 232-byte entry to the store, the owner paying its rent.",
+        "`expires_at` zero grants a persisted key into the program's ring of five (a sixth pushes out the oldest); any other value a temporary key in the program's one slot, dead at that unix second."
       ],
       "discriminator": [
-        116,
-        150,
-        47,
-        4,
-        211,
-        225,
-        133,
-        201
+        187,
+        218,
+        251,
+        161,
+        99,
+        40,
+        34,
+        34
       ],
       "accounts": [
         {
-          "name": "ledger",
+          "name": "session",
           "writable": true,
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  108,
+                  115,
                   101,
-                  100,
-                  103,
-                  101,
-                  114
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
                 ]
               },
               {
@@ -48,13 +51,26 @@
         },
         {
           "name": "owner",
+          "writable": true,
           "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
         {
-          "name": "authorized",
+          "name": "program",
           "type": "pubkey"
+        },
+        {
+          "name": "key",
+          "type": "pubkey"
+        },
+        {
+          "name": "expires_at",
+          "type": "i64"
         }
       ]
     },
@@ -145,6 +161,13 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "session",
+          "writable": true,
+          "docs": [
+            "The wallet's store, closed with the ledger; ignored for a program's ledger."
+          ]
         }
       ],
       "args": []
@@ -548,6 +571,30 @@
           "address": "11111111111111111111111111111111"
         },
         {
+          "name": "session",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
           "name": "mint",
           "optional": true,
           "docs": [
@@ -576,6 +623,9 @@
             "option": "u16"
           }
         }
+      ],
+      "docs": [
+        "Creates the ledger, its permission and its session store on first use."
       ]
     },
     {
@@ -1014,6 +1064,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "session",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -1117,6 +1191,63 @@
       "args": []
     },
     {
+      "name": "revoke_session",
+      "docs": [
+        "Forgets `key` within `program`'s entry. The zero key drops the entry whole, the program's access with it, and refunds its rent to the owner. basenet only; the owner signs."
+      ],
+      "discriminator": [
+        86,
+        92,
+        198,
+        120,
+        144,
+        2,
+        7,
+        194
+      ],
+      "accounts": [
+        {
+          "name": "session",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  101,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "program",
+          "type": "pubkey"
+        },
+        {
+          "name": "key",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "settle",
       "docs": [
         "The only cross-ledger movement. Pure bookkeeping; reserves untouched."
@@ -1186,6 +1317,13 @@
         },
         {
           "name": "dst_consenter"
+        },
+        {
+          "name": "session",
+          "optional": true,
+          "docs": [
+            "The credited wallet's session store, when a session key consents to a new slot."
+          ]
         }
       ],
       "args": [
@@ -1203,7 +1341,8 @@
       "name": "settle_receipt",
       "docs": [
         "Settles a receipt. Debiting the human needs the consenter (owner or session key) to sign; credits need nobody.",
-        "Then pass the owners\u2019 ledgers (writable, one per receipt owner) followed by the callback\u2019s forwarded accounts."
+        "Then pass the owners\u2019 ledgers (writable, one per receipt owner) followed by the callback\u2019s forwarded accounts.",
+        "After the named accounts: the receipt's ledgers in owner order, then \u2014 when one of them is a wallet's \u2014 that wallet's session store, then the accounts forwarded to the callback."
       ],
       "discriminator": [
         216,
@@ -1439,6 +1578,19 @@
         95,
         32
       ]
+    },
+    {
+      "name": "Session",
+      "discriminator": [
+        243,
+        81,
+        72,
+        115,
+        214,
+        188,
+        72,
+        144
+      ]
     }
   ],
   "errors": [
@@ -1493,14 +1645,19 @@
       "msg": "This ledger already has enough free slots"
     },
     {
-      "code": 6010,
+      "code": 6009,
       "name": "BadSlotCount",
       "msg": "Slot count must be between 1 and 256"
     },
     {
-      "code": 6011,
+      "code": 6010,
       "name": "PermissionFailed",
       "msg": "Creating the ledger's permission account failed"
+    },
+    {
+      "code": 6011,
+      "name": "PermissionExists",
+      "msg": "PermissionExists"
     },
     {
       "code": 6012,
@@ -1508,19 +1665,24 @@
       "msg": "This ledger has no permission account \u2014 create one before delegating"
     },
     {
-      "code": 6013,
+      "code": 6012,
       "name": "MissingTokenAccounts",
       "msg": "A token account pair is missing for a non-zero balance"
     },
     {
-      "code": 6014,
+      "code": 6013,
       "name": "NotCanonicalReserve",
       "msg": "The reserve must be the vault's associated token account for this mint"
     },
     {
-      "code": 6015,
+      "code": 6014,
       "name": "VaultNotInitialized",
       "msg": "The vault is not funded to its rent floor \u2014 call initialize_vault first"
+    },
+    {
+      "code": 6015,
+      "name": "BadLedgerOwner",
+      "msg": "Ledger account is not owned by this program"
     },
     {
       "code": 6016,
@@ -1528,39 +1690,44 @@
       "msg": "Only the program's upgrade authority may initialize the vault"
     },
     {
-      "code": 6017,
-      "name": "BadLedgerOwner",
-      "msg": "Ledger account is not owned by this program"
-    },
-    {
-      "code": 6018,
+      "code": 6016,
       "name": "NoAuthorization",
       "msg": "The invoked program returned no usable authorization"
     },
     {
-      "code": 6019,
+      "code": 6017,
       "name": "BadAuthority",
       "msg": "The returned seeds do not derive the program ledger's owner"
     },
     {
-      "code": 6020,
+      "code": 6018,
       "name": "OffCurveOwnerNotAllowed",
       "msg": "deposit and withdraw are wallet-only; program ledgers move value through settle"
     },
     {
-      "code": 6021,
+      "code": 6019,
       "name": "MustFundOwnLedger",
       "msg": "A wallet must fund its own ledger \u2014 only a PDA's rent may be sponsored"
     },
     {
-      "code": 6022,
+      "code": 6020,
       "name": "NotRentPayer",
       "msg": "Only the ledger's recorded rent payer may do this"
     },
     {
-      "code": 6023,
+      "code": 6021,
       "name": "LedgerExists",
       "msg": "That ledger already exists"
+    },
+    {
+      "code": 6022,
+      "name": "NotAReceipt",
+      "msg": "NotAReceipt"
+    },
+    {
+      "code": 6023,
+      "name": "OwnerNotWallet",
+      "msg": "This instruction is for wallet ledgers \u2014 the owner must be on-curve"
     },
     {
       "code": 6024,
@@ -1568,34 +1735,64 @@
       "msg": "This receipt has already been settled"
     },
     {
-      "code": 6025,
-      "name": "OwnerNotWallet",
-      "msg": "This instruction is for wallet ledgers \u2014 the owner must be on-curve"
-    },
-    {
-      "code": 6026,
+      "code": 6024,
       "name": "OwnerNotPda",
       "msg": "This instruction is for program ledgers \u2014 the owner must be a PDA"
     },
     {
-      "code": 6027,
+      "code": 6025,
       "name": "MemberProgramMismatch",
       "msg": "The seeds do not derive the owner under the claimed member program"
     },
     {
-      "code": 6028,
+      "code": 6026,
       "name": "CannotAuthorizePdaLedger",
       "msg": "A program ledger cannot carry a session key \u2014 only wallets delegate consent"
     },
     {
-      "code": 6029,
+      "code": 6027,
       "name": "BadAuthorizedKey",
       "msg": "The authorized key must be on-curve, and the authority must be set"
     },
     {
-      "code": 6030,
+      "code": 6028,
       "name": "NotAuthorizedToConsent",
       "msg": "The signer is neither the debited ledger's owner nor its session key for this authority"
+    },
+    {
+      "code": 6029,
+      "name": "ReceiptLive",
+      "msg": "ReceiptLive"
+    },
+    {
+      "code": 6030,
+      "name": "ReceiptExpired",
+      "msg": "ReceiptExpired"
+    },
+    {
+      "code": 6031,
+      "name": "ReceiptNotConsumed",
+      "msg": "ReceiptNotConsumed"
+    },
+    {
+      "code": 6032,
+      "name": "CallbackProgramMismatch",
+      "msg": "CallbackProgramMismatch"
+    },
+    {
+      "code": 6033,
+      "name": "DuplicateLedger",
+      "msg": "DuplicateLedger"
+    },
+    {
+      "code": 6034,
+      "name": "SlotClaimNeedsConsent",
+      "msg": "SlotClaimNeedsConsent"
+    },
+    {
+      "code": 6035,
+      "name": "BadExpiry",
+      "msg": "A temporary session key with an expiry already past."
     }
   ],
   "types": [
@@ -1657,7 +1854,7 @@
           {
             "name": "authorized",
             "docs": [
-              "Wallet: a session key that may consent to debits, or zero. PDA: the member program."
+              "PDA: the member program. Wallet: unused, always zero \u2014 session keys live in the Session store."
             ],
             "type": "pubkey"
           },
@@ -1700,6 +1897,76 @@
           {
             "name": "to",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Session",
+      "docs": [
+        "One per wallet, created empty with its ledger, never delegated: the keys its game clients may consent with, one entry per program."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "_pad",
+            "type": {
+              "array": [
+                "u8",
+                3
+              ]
+            }
+          },
+          {
+            "name": "entries",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "SessionEntry"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SessionEntry",
+      "docs": [
+        "One program's keys: the temporary slot and the ring of five, oldest first."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "program",
+            "type": "pubkey"
+          },
+          {
+            "name": "temporary",
+            "type": "pubkey"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "ring",
+            "type": {
+              "array": [
+                "pubkey",
+                5
+              ]
+            }
           }
         ]
       }
