@@ -4933,6 +4933,7 @@ dependencies = [
  "solana-account 4.3.2",
  "solana-curve25519 2.3.13",
  "solana-program 3.0.0",
+ "solana-svm-log-collector",
  "solana-system-interface 2.0.0",
 ]
 
