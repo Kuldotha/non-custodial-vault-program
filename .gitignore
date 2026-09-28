@@ -15,3 +15,8 @@ id.json
 .idea/
 .vscode/
 .DS_Store
+
+# The Kotlin client's Gradle output
+vault-client/build/
+.gradle/
+.kotlin/
