@@ -19,6 +19,8 @@
   #log { background:#010409; border:1px solid #30363d; border-radius:6px; padding:12px; height:230px; overflow:auto; font-size:12px; white-space:pre-wrap; }
   a { color:#58a6ff; } .ok{color:#3fb950;} .err{color:#f85149;} .warnc{color:#d29922;}
   .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;border:1px solid #30363d;}
+  table { border-collapse:collapse; width:100%; font-size:12px; } th { text-align:left; color:#8b949e; font-weight:normal; }
+  th, td { padding:4px 10px 4px 0; border-bottom:1px solid #21262d; white-space:nowrap; } td.num, th.num { text-align:right; }
 </style>
 </head>
 <body>
@@ -66,6 +68,12 @@
   <div id="state" class="mono">Ledger: <span class="k">connect + refresh to load</span></div>
 </div>
 
+<div class="card">
+  <button id="listall" class="ghost">List all ledgers</button>
+  <span class="k" style="font-size:12px">basenet snapshot — a delegated ledger shows its last commit, not its live balance</span>
+  <div id="ledgers" class="mono" style="margin-top:8px"></div>
+</div>
+
 <div class="card"><div id="log"></div></div>
 
 <script type="module">
@@ -79,6 +87,12 @@ import bs58 from 'https://esm.sh/bs58@6';
 const CLUSTERS = {
   devnet:  { rpc: 'https://rpc.magicblock.app/devnet',  tee: 'https://devnet-tee.magicblock.app'  },
   mainnet: { rpc: 'https://rpc.magicblock.app/mainnet', tee: 'https://mainnet-tee.magicblock.app' },
+};
+// The gateway dies now and then; a failed refresh on a preset gateway swaps to the public RPC.
+const RPC_FALLBACK = {
+  'https://rpc.magicblock.app/devnet':  'https://api.devnet.solana.com',
+  // not api.mainnet-beta: it 403s browser origins — publicnode allows CORS
+  'https://rpc.magicblock.app/mainnet': 'https://solana-rpc.publicnode.com',
 };
 
 // ── program + infra constants (verified against the vault handlers) ──
@@ -290,8 +304,66 @@ async function refresh() {
       s += '<span class="k">delegated ledger data lives on the rollup; undelegate to read it here.</span>';
     }
     $('state').innerHTML = s;
-  } catch(e){ gate('unknown'); $('state').innerHTML='<span class="warnc">ledger read failed — check the Basenet RPC (public mainnet-beta often blocks localhost). Create is still available.</span>'; log('refresh failed: '+e.message,'err'); }
+  } catch(e){
+    const fb = RPC_FALLBACK[$('rpc').value.trim()];
+    if (fb) { $('rpc').value = fb; log('basenet gateway unreachable — falling back to '+fb,'warnc'); return refresh(); }
+    gate('unknown'); $('state').innerHTML='<span class="warnc">ledger read failed — check the Basenet RPC (public mainnet-beta often blocks localhost). Create is still available.</span>'; log('refresh failed: '+e.message,'err');
+  }
 }
+
+// ── every ledger the vault knows, wherever it sits ──
+// Ledger header: disc 8 | owner 32 | pda_auth 1 | bump 1 | pad 6 | rent_payer 32 | authorized 32 |
+// count u32 — entry 0 is always SOL, so the first 156 bytes carry everything shown here.
+const LEDGER_DISC = [43,41,21,213,180,176,95,32];
+$('listall').onclick = listLedgers;
+async function listLedgers() {
+  $('ledgers').innerHTML = '<span class="k">loading…</span>';
+  try {
+    const conn = rpc();
+    const filters = [{ memcmp: { offset: 0, bytes: bs58.encode(Uint8Array.from(LEDGER_DISC)) } }];
+    const dataSlice = { offset: 0, length: 156 };
+    // A delegated ledger is owned by the delegation program on basenet; its data is the last commit.
+    const [home, delegated] = await Promise.all([
+      conn.getProgramAccounts(VAULT, { filters, dataSlice }),
+      conn.getProgramAccounts(DELEGATION, { filters, dataSlice }),
+    ]);
+    const rows = [...home.map(a => decodeLedger(a, false)), ...delegated.map(a => decodeLedger(a, true))]
+      .filter(Boolean).sort((a, b) => Number(b.sol - a.sol));
+    const total = rows.reduce((s, r) => s + r.sol, 0n);
+    const cells = rows.map(r => `<tr>
+      <td>${short(r.ledger)}</td>
+      <td>${r.pda ? `<span class="pill">PDA</span> ${short(r.owner)} <span class="k">of ${short(r.program)}</span>` : short(r.owner)}</td>
+      <td class="num">${fmtSol(r.sol)}</td>
+      <td><span class="pill">${r.delegated ? 'delegated' : 'home'}</span></td>
+    </tr>`).join('');
+    $('ledgers').innerHTML = `<table><tr><th>ledger</th><th>owner</th><th class="num">SOL</th><th>state</th></tr>${cells}</table>
+      <div style="margin-top:6px" class="k">${rows.length} ledgers (${rows.filter(r => !r.delegated).length} home, ${rows.filter(r => r.delegated).length} delegated) · ${fmtSol(total)} SOL claimed</div>`;
+  } catch (e) {
+    const fb = RPC_FALLBACK[$('rpc').value.trim()];
+    if (fb) { $('rpc').value = fb; log('basenet gateway refused the scan — falling back to ' + fb, 'warnc'); return listLedgers(); }
+    $('ledgers').innerHTML = '<span class="err">scan failed — see log</span>'; log('list failed: ' + e.message, 'err');
+  }
+}
+// Only a real ["ledger", owner] address counts: the discriminator alone also matches a
+// delegation buffer's copy and the odd truncated account under the delegation program.
+function decodeLedger({ pubkey, account }, delegated) {
+  const d = account.data;
+  if (d.length < 116) return null;
+  const owner = new PublicKey(d.slice(8, 40));
+  if (!pda([enc.encode('ledger'), owner.toBytes()], VAULT).equals(pubkey)) return null;
+  const dv = new DataView(d.buffer, d.byteOffset);
+  const count = dv.getUint32(112, true);
+  return {
+    ledger: pubkey.toBase58(),
+    owner: owner.toBase58(),
+    pda: d[40] === 1,
+    program: new PublicKey(d.slice(80, 112)).toBase58(),
+    sol: count > 0 && d.length >= 156 ? dv.getBigUint64(148, true) : 0n,
+    delegated,
+  };
+}
+const short = k => `<span title="${k}">${k.slice(0, 4)}…${k.slice(-4)}</span>`;
+const fmtSol = l => (Number(l) / 1e9).toFixed(4);
 
 function guard(fn){ return async () => {
   if (!wallet) return log('connect a wallet first','warnc');
