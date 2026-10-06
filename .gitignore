@@ -20,3 +20,9 @@ id.json
 vault-client/build/
 .gradle/
 .kotlin/
+
+# Secret keys never belong in a repository: they live in ~/keys (see .githooks/pre-commit).
+*keypair*.json
+*wallets*.json
+id.json
+*.key

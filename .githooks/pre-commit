@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Refuses a commit that would add a Solana secret key: a JSON array of exactly 64 byte values,
+# whatever the file is called. Keys live in ~/keys, never in a repository — once pushed, a key
+# is in the history for good. `git commit --no-verify` overrides, deliberately.
+set -euo pipefail
+
+found=0
+while IFS= read -r -d '' path; do
+    # Text only: a binary file cannot hold the JSON form.
+    if git diff --cached --numstat -- "$path" | grep -q '^-'; then continue; fi
+    if git show ":$path" 2>/dev/null | tr -d ' \t\r\n' \
+        | grep -Eq '\[([0-9]{1,3},){63}[0-9]{1,3}\]'; then
+        echo "pre-commit: $path holds what looks like a Solana secret key (64 bytes)." >&2
+        found=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ "$found" -ne 0 ]; then
+    echo "Keep keys in ~/keys and read them by path. Override with --no-verify only if it is not a key." >&2
+    exit 1
+fi
