@@ -11,6 +11,7 @@ const INITIALIZE_VAULT: [u8; 8] = [48, 191, 163, 44, 71, 129, 63, 164];
 const OPEN_WALLET_LEDGER: [u8; 8] = [219, 161, 148, 96, 48, 166, 60, 149];
 const OPEN_PDA_LEDGER: [u8; 8] = [129, 231, 253, 170, 87, 172, 11, 29];
 const GROW_PDA_LEDGER: [u8; 8] = [197, 145, 30, 32, 242, 38, 205, 203];
+const ADD_PDA_CALLER: [u8; 8] = [179, 6, 243, 124, 245, 19, 225, 185];
 const MAKE_PUBLIC: [u8; 8] = [41, 76, 102, 98, 184, 102, 132, 29];
 const MAKE_WALLET_LEDGER_PRIVATE: [u8; 8] = [176, 216, 128, 156, 39, 62, 187, 89];
 const MAKE_PDA_LEDGER_PRIVATE: [u8; 8] = [200, 46, 191, 221, 30, 12, 10, 96];
@@ -47,6 +48,7 @@ pub fn dispatch(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> 
         REVOKE_SESSION => instructions::session::revoke_handler(program_id, accounts, data),
         OPEN_WALLET_LEDGER => instructions::open_wallet_ledger::handler(program_id, accounts, data),
         OPEN_PDA_LEDGER => instructions::open_pda_ledger::handler(program_id, accounts, data),
+        ADD_PDA_CALLER => instructions::privacy::add_pda_caller_handler(program_id, accounts, data),
         MAKE_PUBLIC => instructions::privacy::make_public_handler(program_id, accounts),
         MAKE_WALLET_LEDGER_PRIVATE => {
             instructions::privacy::make_wallet_ledger_private_handler(program_id, accounts)

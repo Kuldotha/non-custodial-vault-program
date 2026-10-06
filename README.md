@@ -443,3 +443,7 @@ programs/vault/src/
 vault-idl.json              Anchor-style IDL of the wire format
 vault-program-spec.md       the long-form design notes
 ```
+
+### Additional PDA ledger callers
+
+`add_pda_caller(member_program, owner_seeds, caller)` requires the ledger owner PDA to sign. The supplied seeds (including its bump) must derive that owner under `member_program`. It adds access to the existing private permission without changing balances, removing members, changing their flags, or exposing history. Public permissions remain public. Accounts are owner, ledger, writable permission, and the ACL program. Run it on the validator holding the ledger.

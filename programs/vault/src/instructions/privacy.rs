@@ -135,3 +135,61 @@ pub fn make_pda_ledger_private_handler(
         &[b"ledger", owner.key.as_ref(), &[bump]],
     )
 }
+
+#[derive(BorshDeserialize)]
+struct AddPdaCaller {
+    member_program: Pubkey,
+    owner_seeds: Vec<Vec<u8>>,
+    caller: Pubkey,
+}
+
+/// Adds a caller without changing balances, ledger authority, or existing permission flags.
+/// Accounts: [owner (signer), ledger, permission, permission_program]
+pub fn add_pda_caller_handler(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let args = AddPdaCaller::try_from_slice(data).map_err(|_| ProgramError::InvalidInstructionData)?;
+    let [owner, ledger, permission_account, permission_program, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    if !owner.is_signer { return Err(ProgramError::MissingRequiredSignature); }
+    verify_pda_owner(owner.key, &args.member_program, &args.owner_seeds)?;
+    let bump = pda::validate(program_id, ledger, &[b"ledger", owner.key.as_ref()])?;
+    let state = Ledger::load_checked(ledger, program_id)?;
+    if state.owner != *owner.key { return Err(VaultError::BadLedgerOwner.into()); }
+    permission::add_caller(permission_program, ledger, permission_account, args.caller,
+        &[b"ledger", owner.key.as_ref(), &[bump]])
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::*;
+    use borsh::BorshSerialize;
+
+    fn request(program: Pubkey, caller: Pubkey, seeds: Vec<Vec<u8>>) -> Vec<u8> {
+        let mut data = program.to_bytes().to_vec();
+        seeds.serialize(&mut data).unwrap();
+        data.extend_from_slice(caller.as_ref());
+        data
+    }
+
+    #[test]
+    fn adding_a_caller_requires_the_owner_signature() {
+        let key = Pubkey::new_unique();
+        let mut lamports = 0;
+        let mut data = [];
+        let account = AccountInfo::new(&key, false, false, &mut lamports, &mut data, &crate::ID, false);
+        let accounts = vec![account; 4];
+        assert_eq!(add_pda_caller_handler(&crate::ID, &accounts, &request(Pubkey::new_unique(), key, vec![])), Err(ProgramError::MissingRequiredSignature));
+    }
+
+    #[test]
+    fn a_signed_owner_cannot_claim_another_programs_pda() {
+        let game = Pubkey::new_unique();
+        let (owner, bump) = Pubkey::find_program_address(&[b"house"], &game);
+        let mut lamports = 0;
+        let mut data = [];
+        let account = AccountInfo::new(&owner, true, false, &mut lamports, &mut data, &crate::ID, false);
+        let accounts = vec![account; 4];
+        assert!(add_pda_caller_handler(&crate::ID, &accounts,
+            &request(Pubkey::new_unique(), owner, vec![b"house".to_vec(), vec![bump]])).is_err());
+    }
+}

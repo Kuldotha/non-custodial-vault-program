@@ -1563,6 +1563,55 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "add_pda_caller",
+      "docs": [
+        "Adds a caller to an existing private PDA ledger permission. The owner PDA must sign and prove its owning program. Existing members and flags are preserved."
+      ],
+      "discriminator": [
+        179,
+        6,
+        243,
+        124,
+        245,
+        19,
+        225,
+        185
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "ledger"
+        },
+        {
+          "name": "permission",
+          "writable": true
+        },
+        {
+          "name": "permission_program",
+          "address": "ACLseoPoyC3cBqoUtkbjZ4aDrkurZW86v19pXz2XQnp1"
+        }
+      ],
+      "args": [
+        {
+          "name": "member_program",
+          "type": "pubkey"
+        },
+        {
+          "name": "owner_seeds",
+          "type": {
+            "vec": "bytes"
+          }
+        },
+        {
+          "name": "caller",
+          "type": "pubkey"
+        }
+      ]
     }
   ],
   "accounts": [
