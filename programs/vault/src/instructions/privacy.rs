@@ -153,7 +153,10 @@ pub fn add_pda_caller_handler(program_id: &Pubkey, accounts: &[AccountInfo], dat
     if !owner.is_signer { return Err(ProgramError::MissingRequiredSignature); }
     verify_pda_owner(owner.key, &args.member_program, &args.owner_seeds)?;
     let bump = pda::validate(program_id, ledger, &[b"ledger", owner.key.as_ref()])?;
-    let state = Ledger::load_checked(ledger, program_id)?;
+    if ledger.owner != program_id && *ledger.owner != ephemeral_rollups_sdk::consts::DELEGATION_PROGRAM_ID {
+        return Err(ProgramError::IllegalOwner);
+    }
+    let state = Ledger::read_from(&ledger.try_borrow_data()?)?;
     if state.owner != *owner.key { return Err(VaultError::BadLedgerOwner.into()); }
     permission::add_caller(permission_program, ledger, permission_account, args.caller,
         &[b"ledger", owner.key.as_ref(), &[bump]])

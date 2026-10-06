@@ -18,7 +18,8 @@ fn caller_registration_keeps_members_flags_and_balances() {
     let caller = Pubkey::new_unique();
     let reader = Pubkey::new_unique();
     let (owner, bump) = Pubkey::find_program_address(&[b"house"], &game);
-    let (ledger, ledger_account) = make_ledger(&owner, true, &reader, game, 1, |_| {});
+    let (ledger, mut ledger_account) = make_ledger(&owner, true, &reader, game, 1, |_| {});
+    ledger_account.owner = ephemeral_rollups_sdk::consts::DELEGATION_PROGRAM_ID;
     let (permission, permission_bump) = Permission::find_pda(&ledger);
     let mut bytes = borsh::to_vec(&Permission {
         discriminator: 0, bump: permission_bump, permissioned_account: ledger,
@@ -41,7 +42,8 @@ fn caller_registration_keeps_members_flags_and_balances() {
     let updated = result.resulting_accounts.iter().find(|(key,_)| *key == permission).unwrap();
     let parsed = Permission::deserialize(&mut &updated.1.data[..]).unwrap();
     let members = parsed.members.unwrap();
-    assert_eq!(members.len(), 3);
+    assert_eq!(members.len(), 4);
+    assert!(members.iter().any(|m| m.pubkey == ephemeral_rollups_sdk::consts::DELEGATION_PROGRAM_ID));
     assert!(members.iter().any(|m| m.pubkey == reader && m.flags == 3));
     assert!(members.iter().any(|m| m.pubkey == vault::ID));
     assert!(members.iter().any(|m| m.pubkey == caller && m.flags == 0));

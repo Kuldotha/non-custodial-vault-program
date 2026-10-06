@@ -61,7 +61,7 @@ pub fn add_caller<'a>(
     if parsed.discriminator != 0 || parsed.permissioned_account != *account.key { return Err(ProgramError::InvalidAccountData); }
     let Some(mut members) = parsed.members else { return Ok(()); };
     let mut changed = false;
-    for key in [*account.owner, caller] {
+    for key in [crate::ID, caller] {
         if !members.iter().any(|member| member.pubkey == key) {
             members.push(Member { flags: 0, pubkey: key });
             changed = true;
